@@ -112,6 +112,7 @@ impl NetworkClient {
     pub async fn fetch_playlist(
         &self,
         yt_dlp_path: &std::path::Path,
+        browser: Option<&str>,
         cookies_path: &std::path::Path,
         js_runtime: &str,
         playlist_url: &str,
@@ -125,7 +126,9 @@ impl NetworkClient {
             "-J",
         ]);
         
-        if cookies_path.exists() && std::fs::metadata(cookies_path).map(|m| m.len() > 0).unwrap_or(false) {
+        if let Some(b) = browser {
+            cmd.arg("--cookies-from-browser").arg(b);
+        } else if cookies_path.exists() && std::fs::metadata(cookies_path).map(|m| m.len() > 0).unwrap_or(false) {
             cmd.arg("--cookies").arg(cookies_path);
         }
         
@@ -172,6 +175,7 @@ impl NetworkClient {
     pub async fn fetch_library_playlists(
         &self,
         yt_dlp_path: &std::path::Path,
+        browser: Option<&str>,
         cookies_path: &std::path::Path,
         js_runtime: &str,
     ) -> Result<Vec<PlaylistInfo>, anyhow::Error> {
@@ -184,10 +188,12 @@ impl NetworkClient {
             "-J",
         ]);
         
-        if cookies_path.exists() && std::fs::metadata(cookies_path).map(|m| m.len() > 0).unwrap_or(false) {
+        if let Some(b) = browser {
+            cmd.arg("--cookies-from-browser").arg(b);
+        } else if cookies_path.exists() && std::fs::metadata(cookies_path).map(|m| m.len() > 0).unwrap_or(false) {
             cmd.arg("--cookies").arg(cookies_path);
         } else {
-            return Err(anyhow::anyhow!("Not logged in (cookies.txt not found or empty). Use the login feature first."));
+            return Err(anyhow::anyhow!("Not logged in (browser.txt or cookies.txt not found). Use the login feature first."));
         }
         
         cmd.arg("https://www.youtube.com/feed/playlists");

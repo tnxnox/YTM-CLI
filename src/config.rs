@@ -43,14 +43,32 @@ impl Config {
     }
 
     pub fn is_logged_in(&self) -> bool {
-        self.cookies_path.exists() && std::fs::metadata(&self.cookies_path).map(|m| m.len() > 0).unwrap_or(false)
+        let browser_path = self.config_dir.join("browser.txt");
+        if browser_path.exists() {
+            true
+        } else {
+            self.cookies_path.exists() && std::fs::metadata(&self.cookies_path).map(|m| m.len() > 0).unwrap_or(false)
+        }
     }
 
     pub fn logout(&self) -> std::io::Result<()> {
+        let browser_path = self.config_dir.join("browser.txt");
+        if browser_path.exists() {
+            std::fs::remove_file(&browser_path)?;
+        }
         if self.cookies_path.exists() {
             std::fs::remove_file(&self.cookies_path)?;
         }
         Ok(())
+    }
+
+    pub fn get_browser(&self) -> Option<String> {
+        let browser_path = self.config_dir.join("browser.txt");
+        if browser_path.exists() {
+            std::fs::read_to_string(&browser_path).ok().map(|s| s.trim().to_string())
+        } else {
+            None
+        }
     }
 
     pub fn get_js_runtime_arg(&self) -> String {
@@ -66,34 +84,31 @@ impl Config {
 
     pub async fn login(&self, browser: &str) -> Result<(), anyhow::Error> {
         let yt_dlp_path = self.ensure_yt_dlp().await?;
-        println!("  🔑 Extracting cookies from {}... (Please close the browser if it is Chromium-based)", browser);
+        println!("  🔑 Verifying cookies from {}... (Please close the browser if it is Chromium-based)", browser);
         
-        let _status = tokio::process::Command::new(&yt_dlp_path)
+        let output = tokio::process::Command::new(&yt_dlp_path)
             .args(&[
                 "--js-runtimes", &self.get_js_runtime_arg(),
                 "--remote-components", "ejs:github",
                 "--cookies-from-browser", browser,
-                "--cookies", &self.cookies_path.to_string_lossy(),
                 "--skip-download",
                 "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
             ])
             .output()
-            .await;
+            .await?;
 
-        if self.is_logged_in() {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                if let Ok(metadata) = std::fs::metadata(&self.cookies_path) {
-                    let mut perms = metadata.permissions();
-                    perms.set_mode(0o600);
-                    let _ = std::fs::set_permissions(&self.cookies_path, perms);
-                }
+        if output.status.success() {
+            let browser_path = self.config_dir.join("browser.txt");
+            std::fs::write(&browser_path, browser)?;
+            // Clean up old cookies.txt to avoid confusion
+            if self.cookies_path.exists() {
+                let _ = std::fs::remove_file(&self.cookies_path);
             }
             println!("  ✅ Login successful!");
             Ok(())
         } else {
-            Err(anyhow::anyhow!("Login failed. Make sure the browser '{}' is installed, closed (if Chromium-based), and you are logged into YouTube/YouTube Music on it.", browser))
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(anyhow::anyhow!("Login failed. Make sure the browser '{}' is installed, closed (if Chromium-based), and you are logged into YouTube/YouTube Music on it.\nError details: {}", browser, stderr))
         }
     }
 

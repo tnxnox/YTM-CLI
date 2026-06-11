@@ -513,7 +513,10 @@ async fn play_track(
             &format!("https://www.youtube.com/watch?v={}", video_id),
             "-o", &config.cache_dir.join(format!("{}.%(ext)s", video_id)).to_string_lossy(),
         ]);
-        if config.cookies_path.exists() && std::fs::metadata(&config.cookies_path).map(|m| m.len() > 0).unwrap_or(false) {
+        let browser = config.get_browser();
+        if let Some(ref b) = browser {
+            cmd.arg("--cookies-from-browser").arg(b);
+        } else if config.cookies_path.exists() && std::fs::metadata(&config.cookies_path).map(|m| m.len() > 0).unwrap_or(false) {
             cmd.arg("--cookies").arg(&config.cookies_path);
         }
         cmd.kill_on_drop(true);
@@ -700,7 +703,10 @@ fn spawn_prefetch(
                 &format!("https://www.youtube.com/watch?v={}", video_id),
                 "-o", &config.cache_dir.join(format!("{}.%(ext)s", video_id)).to_string_lossy(),
             ]);
-            if config.cookies_path.exists() && std::fs::metadata(&config.cookies_path).map(|m| m.len() > 0).unwrap_or(false) {
+            let browser = config.get_browser();
+            if let Some(ref b) = browser {
+                cmd.arg("--cookies-from-browser").arg(b);
+            } else if config.cookies_path.exists() && std::fs::metadata(&config.cookies_path).map(|m| m.len() > 0).unwrap_or(false) {
                 cmd.arg("--cookies").arg(&config.cookies_path);
             }
             cmd.kill_on_drop(true);
@@ -1296,7 +1302,8 @@ async fn run_playlist_playback(
     };
 
     println!("\n  Fetching playlist tracks...");
-    let tracks = match client.fetch_playlist(&yt_dlp_path, &config.cookies_path, &config.get_js_runtime_arg(), &url).await {
+    let browser = config.get_browser();
+    let tracks = match client.fetch_playlist(&yt_dlp_path, browser.as_deref(), &config.cookies_path, &config.get_js_runtime_arg(), &url).await {
         Ok(t) => t,
         Err(e) => {
             println!("  ❌ Failed to fetch playlist tracks: {}", e);
@@ -1357,7 +1364,8 @@ async fn run_library_playlists(config: &Config, db: &Db, client: &NetworkClient,
         let yt_dlp_path = config.ensure_yt_dlp().await?;
 
         println!("\n  Fetching your playlists...");
-        let playlists = match client.fetch_library_playlists(&yt_dlp_path, &config.cookies_path, &config.get_js_runtime_arg()).await {
+        let browser = config.get_browser();
+        let playlists = match client.fetch_library_playlists(&yt_dlp_path, browser.as_deref(), &config.cookies_path, &config.get_js_runtime_arg()).await {
             Ok(p) => p,
             Err(e) => {
                 println!("  ❌ Failed to fetch library playlists: {}", e);
@@ -1690,7 +1698,8 @@ async fn main() -> Result<()> {
         Some(Commands::Playlist { url, shuffle }) => {
             let yt_dlp_path = config.ensure_yt_dlp().await?;
             println!("Fetching playlist details...");
-            let mut tracks = client.fetch_playlist(&yt_dlp_path, &config.cookies_path, &config.get_js_runtime_arg(), &url).await?;
+            let browser = config.get_browser();
+            let mut tracks = client.fetch_playlist(&yt_dlp_path, browser.as_deref(), &config.cookies_path, &config.get_js_runtime_arg(), &url).await?;
             if tracks.is_empty() {
                 println!("No tracks found in playlist.");
                 return Ok(());
