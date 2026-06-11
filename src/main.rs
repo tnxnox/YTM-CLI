@@ -525,9 +525,15 @@ async fn play_track(
                                 let now_seek = Instant::now();
                                 if now_seek.duration_since(last_seek) >= Duration::from_millis(250) {
                                     let new_pos = elapsed.saturating_sub(Duration::from_secs(5));
-                                    if sink.try_seek(new_pos).is_ok() {
-                                        elapsed = new_pos;
-                                        last_seek = now_seek;
+                                    match sink.try_seek(new_pos) {
+                                        Ok(_) => {
+                                            elapsed = new_pos;
+                                            last_seek = now_seek;
+                                        }
+                                        Err(e) => {
+                                            print!("\r\n  ❌ Left seek failed: {:?}\r\n", e);
+                                            std::io::stdout().flush().ok();
+                                        }
                                     }
                                 }
                             }
@@ -540,9 +546,15 @@ async fn play_track(
                                         None => true,
                                     };
                                     if can_seek {
-                                        if sink.try_seek(new_pos).is_ok() {
-                                            elapsed = new_pos;
-                                            last_seek = now_seek;
+                                        match sink.try_seek(new_pos) {
+                                            Ok(_) => {
+                                                elapsed = new_pos;
+                                                last_seek = now_seek;
+                                            }
+                                            Err(e) => {
+                                                print!("\r\n  ❌ Right seek failed: {:?}\r\n", e);
+                                                std::io::stdout().flush().ok();
+                                            }
                                         }
                                     }
                                 }
