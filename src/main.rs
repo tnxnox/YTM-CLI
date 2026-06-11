@@ -715,7 +715,7 @@ fn interact_table_select(
 
     loop {
         clear_screen();
-        println!("  ❓ {}\n", theme::style_primary(prompt));
+        print!("  ❓ {}\r\n\r\n", theme::style_primary(prompt));
 
         let mut table = theme::create_styled_table();
         table.set_header(headers.iter().map(|h| theme::style_header_cell(h)).collect::<Vec<_>>());
@@ -790,10 +790,11 @@ fn interact_table_select(
         ]);
 
         for line in table.to_string().lines() {
-            println!("  {}", line);
+            print!("  {}\r\n", line);
         }
 
-        println!("\n  {}", theme::style_dim("🎮 Controls: [↑/↓] Move  [Enter] Select  [Q/Esc] Back"));
+        print!("\r\n  {}\r\n", theme::style_dim("🎮 Controls: [↑/↓] Move  [Enter] Select  [Q/Esc] Back"));
+        std::io::stdout().flush().ok();
 
         if let Event::Key(key_event) = event::read()? {
             if key_event.kind == event::KeyEventKind::Press || key_event.kind == event::KeyEventKind::Repeat {
@@ -834,7 +835,7 @@ fn interact_history_select(
 
     loop {
         clear_screen();
-        println!("  ❓ {}\n", theme::style_primary(prompt));
+        print!("  ❓ {}\r\n\r\n", theme::style_primary(prompt));
 
         let mut table = theme::create_styled_table();
         table.set_header(headers.iter().map(|h| theme::style_header_cell(h)).collect::<Vec<_>>());
@@ -910,10 +911,11 @@ fn interact_history_select(
         ]);
 
         for line in table.to_string().lines() {
-            println!("  {}", line);
+            print!("  {}\r\n", line);
         }
 
-        println!("\n  {}", theme::style_dim("🎮 Controls: [↑/↓] Move  [Enter] Select  [Q/Esc] Back"));
+        print!("\r\n  {}\r\n", theme::style_dim("🎮 Controls: [↑/↓] Move  [Enter] Select  [Q/Esc] Back"));
+        std::io::stdout().flush().ok();
 
         if let Event::Key(key_event) = event::read()? {
             if key_event.kind == event::KeyEventKind::Press || key_event.kind == event::KeyEventKind::Repeat {
