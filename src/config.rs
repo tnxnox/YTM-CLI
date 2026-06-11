@@ -1,12 +1,20 @@
 use std::path::PathBuf;
 use directories::ProjectDirs;
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DiscordSettings {
+    pub enabled: bool,
+    pub token: String,
+    pub channel_id: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub db_path: PathBuf,
     pub cache_dir: PathBuf,
     pub config_dir: PathBuf,
     pub cookies_path: PathBuf,
+    pub discord_settings_path: PathBuf,
 }
 
 impl Config {
@@ -18,6 +26,7 @@ impl Config {
         let cache_dir = proj_dirs.data_dir().join("cache");
         let config_dir = proj_dirs.config_dir().to_path_buf();
         let cookies_path = config_dir.join("cookies.txt");
+        let discord_settings_path = config_dir.join("discord.json");
 
         // Ensure directories exist
         std::fs::create_dir_all(proj_dirs.data_dir()).ok();
@@ -29,6 +38,7 @@ impl Config {
             cache_dir,
             config_dir,
             cookies_path,
+            discord_settings_path,
         }
     }
 
@@ -135,6 +145,21 @@ impl Config {
         } else {
             Err(anyhow::anyhow!("yt-dlp executable not found after successful installation"))
         }
+    }
+
+    pub fn get_discord_settings(&self) -> Option<DiscordSettings> {
+        if self.discord_settings_path.exists() {
+            let content = std::fs::read_to_string(&self.discord_settings_path).ok()?;
+            serde_json::from_str(&content).ok()
+        } else {
+            None
+        }
+    }
+
+    pub fn save_discord_settings(&self, settings: &DiscordSettings) -> std::io::Result<()> {
+        let content = serde_json::to_string_pretty(settings).unwrap();
+        std::fs::write(&self.discord_settings_path, content)?;
+        Ok(())
     }
 }
 

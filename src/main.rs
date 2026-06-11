@@ -3,6 +3,7 @@ pub mod db;
 pub mod network;
 pub mod audio;
 pub mod theme;
+pub mod discord;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -355,6 +356,43 @@ async fn play_track(
     let title = &track.title;
     let artist = &track.artist;
     let total_duration = track.duration_secs.map(|d| Duration::from_secs(d as u64));
+
+    if let Some(discord) = config.get_discord_settings() {
+        if discord.enabled {
+            if queue_info.is_none() {
+                clear_screen();
+                println!("\n  📤 Sending track to Discord channel...");
+            }
+            
+            let cmd_text = format!("m!play https://www.youtube.com/watch?v={}", video_id);
+            match crate::discord::send_discord_command(&discord.token, &discord.channel_id, &cmd_text).await {
+                Ok(_) => {
+                    db.add_history(video_id, title, artist)?;
+                    if let Some((idx, total)) = queue_info {
+                        print!("\r\x1b[K  ✅ [{}/{}] Sent to Discord: {} - {}", idx + 1, total, theme::style_primary(title), artist);
+                        std::io::stdout().flush().ok();
+                        
+                        use std::time::SystemTime;
+                        let seed = SystemTime::now()
+                            .duration_since(SystemTime::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_nanos() as u64;
+                        let delay_ms = 1300 + (seed % 400);
+                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                    } else {
+                        println!("  ✅ Sent to Discord: {} - {}", theme::style_primary(title), artist);
+                        press_enter_to_continue();
+                    }
+                    return Ok(PlaybackControl::Finished);
+                }
+                Err(e) => {
+                    println!("  ❌ Failed to send command to Discord: {}", theme::style_error(&e.to_string()));
+                    press_enter_to_continue();
+                    return Ok(PlaybackControl::Quit);
+                }
+            }
+        }
+    }
 
     let cache_file = config.cache_dir.join(format!("{}.flac", video_id));
     let player = AudioPlayer::new()?;
@@ -1303,6 +1341,117 @@ async fn run_library_playlists(config: &Config, db: &Db, client: &NetworkClient,
     Ok(())
 }
 
+async fn run_discord_menu(config: &Config) -> Result<()> {
+    loop {
+        clear_screen();
+        let settings = config.get_discord_settings();
+        let enabled_status = match &settings {
+            Some(s) if s.enabled => "ON".to_string(),
+            _ => "OFF".to_string(),
+        };
+
+        let status_str = if enabled_status == "ON" {
+            theme::style_primary("ON").to_string()
+        } else {
+            theme::style_dim("OFF").to_string()
+        };
+
+        println!("\n  ── 🤖 Discord Selfbot Mode (Jockie Music) ──");
+        println!("  Status: {}\n", status_str);
+
+        let selections = vec![
+            format!("Toggle Discord Mode (Currently: {})", enabled_status),
+            "Configure Token & Channel ID".to_string(),
+            "🔙 Go back".to_string(),
+        ];
+
+        let selection = dialoguer::Select::with_theme(&theme::get_dialoguer_theme())
+            .with_prompt("Discord Bot Settings")
+            .default(0)
+            .items(&selections)
+            .interact()?;
+
+        match selection {
+            0 => {
+                let mut s = settings.clone().unwrap_or(crate::config::DiscordSettings {
+                    enabled: false,
+                    token: String::new(),
+                    channel_id: String::new(),
+                });
+
+                if !s.enabled && (s.token.is_empty() || s.channel_id.is_empty()) {
+                    println!("\n  ⚠️  Discord Selfbot credentials are required before enabling.");
+                    
+                    let token: String = dialoguer::Input::with_theme(&theme::get_dialoguer_theme())
+                        .with_prompt("Enter Discord User Token (Selfbot)")
+                        .interact_text()?;
+                    
+                    let channel_id: String = dialoguer::Input::with_theme(&theme::get_dialoguer_theme())
+                        .with_prompt("Enter Target Discord Text Channel ID")
+                        .interact_text()?;
+
+                    let token = token.trim();
+                    let channel_id = channel_id.trim();
+
+                    if token.is_empty() || channel_id.is_empty() {
+                        println!("  ❌ {}", theme::style_error("Token and Channel ID cannot be empty."));
+                        press_enter_to_continue();
+                        continue;
+                    }
+
+                    s.token = token.to_string();
+                    s.channel_id = channel_id.to_string();
+                }
+
+                s.enabled = !s.enabled;
+                config.save_discord_settings(&s)?;
+                
+                if s.enabled {
+                    println!("\n  ✅ Discord Selfbot Mode enabled! (Warning: Selfbots violate Discord TOS. Use at your own risk.)");
+                } else {
+                    println!("\n  ❌ Discord Selfbot Mode disabled.");
+                }
+                press_enter_to_continue();
+            }
+            1 => {
+                let mut s = settings.unwrap_or(crate::config::DiscordSettings {
+                    enabled: false,
+                    token: String::new(),
+                    channel_id: String::new(),
+                });
+
+                let token: String = dialoguer::Input::with_theme(&theme::get_dialoguer_theme())
+                    .with_prompt("Enter Discord User Token")
+                    .default(s.token)
+                    .interact_text()?;
+                
+                let channel_id: String = dialoguer::Input::with_theme(&theme::get_dialoguer_theme())
+                    .with_prompt("Enter Discord Text Channel ID")
+                    .default(s.channel_id)
+                    .interact_text()?;
+
+                let token = token.trim();
+                let channel_id = channel_id.trim();
+
+                if token.is_empty() || channel_id.is_empty() {
+                    println!("  ❌ {}", theme::style_error("Token and Channel ID cannot be empty."));
+                    press_enter_to_continue();
+                    continue;
+                }
+
+                s.token = token.to_string();
+                s.channel_id = channel_id.to_string();
+                config.save_discord_settings(&s)?;
+
+                println!("\n  ✨ Credentials updated successfully.");
+                press_enter_to_continue();
+            }
+            _ => break,
+        }
+    }
+    Ok(())
+}
+
 async fn run_interactive_menu(config: &Config, db: &Db, client: &NetworkClient, current_volume: &mut f32, debug: bool) -> Result<()> {
     loop {
         clear_screen();
@@ -1313,6 +1462,7 @@ async fn run_interactive_menu(config: &Config, db: &Db, client: &NetworkClient, 
             "🔍 Search and Play".to_string(),
             "📜 Playback History".to_string(),
             "💾 Cache Management".to_string(),
+            "🤖 Discord Selfbot Mode".to_string(),
         ];
         if logged_in {
             selections.push("🎵 My Playlists".to_string());
@@ -1332,14 +1482,15 @@ async fn run_interactive_menu(config: &Config, db: &Db, client: &NetworkClient, 
             0 => run_search_and_play(config, db, client, current_volume, debug).await?,
             1 => run_history(config, db, client, current_volume, debug).await?,
             2 => run_cache_menu(config, db).await?,
-            3 => {
+            3 => run_discord_menu(config).await?,
+            4 => {
                 if logged_in {
                     run_library_playlists(config, db, client, current_volume, debug).await?;
                 } else {
                     run_login_flow(config).await?;
                 }
             }
-            4 => {
+            5 => {
                 if logged_in {
                     config.logout()?;
                     println!("  ✨ Logged out successfully.");
@@ -1349,7 +1500,7 @@ async fn run_interactive_menu(config: &Config, db: &Db, client: &NetworkClient, 
                     break;
                 }
             }
-            5 => {
+            6 => {
                 println!("  Goodbye! 👋");
                 break;
             }
