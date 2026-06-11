@@ -359,38 +359,88 @@ async fn play_track(
 
     if let Some(discord) = config.get_discord_settings() {
         if discord.enabled {
-            if queue_info.is_none() {
-                clear_screen();
-                println!("\n  📤 Sending track to Discord channel...");
+            clear_screen();
+            let track_name = format!("{} - {}", title, artist);
+            if let Some((idx, total)) = queue_info {
+                println!("  💿 [{}/{}] Playing (Discord Mode): {}", idx + 1, total, theme::style_primary(&track_name));
+            } else {
+                println!("  💿 Playing (Discord Mode): {}", theme::style_primary(&track_name));
             }
             
+            let controls_help = if queue_info.is_some() {
+                "  🎮 Controls: [Space] Play/Pause  [N] Skip  [P] Prev  [Q] Stop/Back"
+            } else {
+                "  🎮 Controls: [Space] Play/Pause  [Q] Stop/Back"
+            };
+            println!("{}", theme::style_dim(controls_help));
+
             let cmd_text = format!("m!play https://www.youtube.com/watch?v={}", video_id);
-            match crate::discord::send_discord_command(&discord.token, &discord.channel_id, &cmd_text).await {
-                Ok(_) => {
-                    db.add_history(video_id, title, artist)?;
-                    if let Some((idx, total)) = queue_info {
-                        print!("\r\x1b[K  ✅ [{}/{}] Sent to Discord: {} - {}", idx + 1, total, theme::style_primary(title), artist);
-                        std::io::stdout().flush().ok();
-                        
-                        use std::time::SystemTime;
-                        let seed = SystemTime::now()
-                            .duration_since(SystemTime::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_nanos() as u64;
-                        let delay_ms = 1300 + (seed % 400);
-                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                    } else {
-                        println!("  ✅ Sent to Discord: {} - {}", theme::style_primary(title), artist);
-                        press_enter_to_continue();
-                    }
-                    return Ok(PlaybackControl::Finished);
-                }
-                Err(e) => {
-                    println!("  ❌ Failed to send command to Discord: {}", theme::style_error(&e.to_string()));
-                    press_enter_to_continue();
-                    return Ok(PlaybackControl::Quit);
-                }
+            if let Err(e) = crate::discord::send_discord_command(&discord.token, &discord.channel_id, &cmd_text).await {
+                println!("  ❌ Failed to send command to Discord: {}", theme::style_error(&e.to_string()));
+                press_enter_to_continue();
+                return Ok(PlaybackControl::Quit);
             }
+            db.add_history(video_id, title, artist)?;
+
+            let total_dur = total_duration.unwrap_or(Duration::from_secs(180));
+            let mut elapsed = Duration::from_secs(0);
+            let mut last_tick = Instant::now();
+            let mut is_paused = false;
+            let mut control = PlaybackControl::Finished;
+
+            {
+                let _guard = RawModeGuard::new()?;
+                while elapsed < total_dur {
+                    let now = Instant::now();
+                    let delta = now.duration_since(last_tick);
+                    last_tick = now;
+
+                    if !is_paused {
+                        elapsed += delta;
+                    }
+
+                    draw_progress_bar(elapsed, total_duration, 1.0, is_paused, None);
+
+                    if event::poll(Duration::from_millis(100))? {
+                        if let Event::Key(key_event) = event::read()? {
+                            if key_event.kind == event::KeyEventKind::Press || key_event.kind == event::KeyEventKind::Repeat {
+                                match key_event.code {
+                                    KeyCode::Char(' ') => {
+                                        is_paused = !is_paused;
+                                        let cmd = if is_paused { "m!pause" } else { "m!resume" };
+                                        crate::discord::send_discord_command(&discord.token, &discord.channel_id, cmd).await.ok();
+                                    }
+                                    KeyCode::Char('n') | KeyCode::Char('N') => {
+                                        if queue_info.is_some() {
+                                            crate::discord::send_discord_command(&discord.token, &discord.channel_id, "m!skip").await.ok();
+                                            control = PlaybackControl::Next;
+                                            break;
+                                        }
+                                    }
+                                    KeyCode::Char('p') | KeyCode::Char('P') => {
+                                        if queue_info.is_some() {
+                                            crate::discord::send_discord_command(&discord.token, &discord.channel_id, "m!skip").await.ok();
+                                            control = PlaybackControl::Prev;
+                                            break;
+                                        }
+                                    }
+                                    KeyCode::Char('q') | KeyCode::Esc => {
+                                        crate::discord::send_discord_command(&discord.token, &discord.channel_id, "m!stop").await.ok();
+                                        control = PlaybackControl::Quit;
+                                        break;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                print!("\r\x1b[K");
+                std::io::stdout().flush().ok();
+            }
+
+            return Ok(control);
         }
     }
 
@@ -1035,17 +1085,20 @@ async fn run_search_and_play(config: &Config, db: &Db, client: &NetworkClient, c
             };
 
             let selected_track = tracks[selection].clone();
-            println!("\n  📻 Fetching autoplay recommendations...");
             let mut queue = vec![selected_track.clone()];
             let mut autoplay_ctoken = None;
             
-            match client.fetch_autoplay_queue(&selected_track.id).await {
-                Ok((mut autoplay_tracks, ctoken)) => {
-                    queue.append(&mut autoplay_tracks);
-                    autoplay_ctoken = ctoken;
-                }
-                Err(e) => {
-                    log::warn!("Failed to fetch autoplay tracks: {}", e);
+            let discord_active = config.get_discord_settings().map(|d| d.enabled).unwrap_or(false);
+            if !discord_active {
+                println!("\n  📻 Fetching autoplay recommendations...");
+                match client.fetch_autoplay_queue(&selected_track.id).await {
+                    Ok((mut autoplay_tracks, ctoken)) => {
+                        queue.append(&mut autoplay_tracks);
+                        autoplay_ctoken = ctoken;
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to fetch autoplay tracks: {}", e);
+                    }
                 }
             }
 
@@ -1083,17 +1136,20 @@ async fn run_history(config: &Config, db: &Db, client: &NetworkClient, current_v
             artist: entry.artist.clone(),
             duration_secs: None,
         };
-        println!("\n  📻 Fetching autoplay recommendations...");
         let mut queue = vec![track.clone()];
         let mut autoplay_ctoken = None;
         
-        match client.fetch_autoplay_queue(&track.id).await {
-            Ok((mut autoplay_tracks, ctoken)) => {
-                queue.append(&mut autoplay_tracks);
-                autoplay_ctoken = ctoken;
-            }
-            Err(e) => {
-                log::warn!("Failed to fetch autoplay tracks: {}", e);
+        let discord_active = config.get_discord_settings().map(|d| d.enabled).unwrap_or(false);
+        if !discord_active {
+            println!("\n  📻 Fetching autoplay recommendations...");
+            match client.fetch_autoplay_queue(&track.id).await {
+                Ok((mut autoplay_tracks, ctoken)) => {
+                    queue.append(&mut autoplay_tracks);
+                    autoplay_ctoken = ctoken;
+                }
+                Err(e) => {
+                    log::warn!("Failed to fetch autoplay tracks: {}", e);
+                }
             }
         }
         play_queue(queue, 0, config, db, client, autoplay_ctoken, current_volume, debug).await?;
@@ -1548,17 +1604,20 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
             let selected_track = tracks[0].clone();
-            println!("  📻 Fetching autoplay recommendations... ");
             let mut queue = vec![selected_track.clone()];
             let mut autoplay_ctoken = None;
             
-            match client.fetch_autoplay_queue(&selected_track.id).await {
-                Ok((mut autoplay_tracks, ctoken)) => {
-                    queue.append(&mut autoplay_tracks);
-                    autoplay_ctoken = ctoken;
-                }
-                Err(e) => {
-                    log::warn!("Failed to fetch autoplay tracks: {}", e);
+            let discord_active = config.get_discord_settings().map(|d| d.enabled).unwrap_or(false);
+            if !discord_active {
+                println!("  📻 Fetching autoplay recommendations... ");
+                match client.fetch_autoplay_queue(&selected_track.id).await {
+                    Ok((mut autoplay_tracks, ctoken)) => {
+                        queue.append(&mut autoplay_tracks);
+                        autoplay_ctoken = ctoken;
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to fetch autoplay tracks: {}", e);
+                    }
                 }
             }
             play_queue(queue, 0, &config, &db, &client, autoplay_ctoken, &mut current_volume, debug).await?;
