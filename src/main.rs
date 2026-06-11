@@ -702,6 +702,245 @@ async fn play_queue(
 // Interactive menu flows
 // ---------------------------------------------------------------------------
 
+fn interact_table_select(
+    prompt: &str,
+    headers: Vec<&str>,
+    tracks: &[TrackInfo],
+    go_back_label: &str,
+) -> Result<Option<usize>> {
+    let mut selected_idx = 0;
+    let num_options = tracks.len() + 1;
+
+    let _guard = RawModeGuard::new()?;
+
+    loop {
+        clear_screen();
+        println!("  ❓ {}\n", theme::style_primary(prompt));
+
+        let mut table = theme::create_styled_table();
+        table.set_header(headers.iter().map(|h| theme::style_header_cell(h)).collect::<Vec<_>>());
+
+        for (i, track) in tracks.iter().enumerate() {
+            let is_selected = i == selected_idx;
+            let dur_str = match track.duration_secs {
+                Some(d) => format_duration(Duration::from_secs(d as u64)),
+                None => "--:--".to_string(),
+            };
+
+            let num_cell = if is_selected {
+                comfy_table::Cell::new(format!("> {}", i + 1))
+                    .fg(comfy_table::Color::Rgb { r: theme::COLOR_PRIMARY.0, g: theme::COLOR_PRIMARY.1, b: theme::COLOR_PRIMARY.2 })
+                    .add_attribute(comfy_table::Attribute::Bold)
+            } else {
+                comfy_table::Cell::new(format!("  {}", i + 1))
+                    .fg(comfy_table::Color::Rgb { r: theme::COLOR_DIM.0, g: theme::COLOR_DIM.1, b: theme::COLOR_DIM.2 })
+            };
+
+            let title_cell = if is_selected {
+                comfy_table::Cell::new(&track.title)
+                    .fg(comfy_table::Color::Rgb { r: theme::COLOR_ACCENT.0, g: theme::COLOR_ACCENT.1, b: theme::COLOR_ACCENT.2 })
+                    .add_attribute(comfy_table::Attribute::Bold)
+            } else {
+                comfy_table::Cell::new(&track.title)
+                    .fg(comfy_table::Color::Rgb { r: theme::COLOR_DIM.0, g: theme::COLOR_DIM.1, b: theme::COLOR_DIM.2 })
+            };
+
+            let artist_cell = if is_selected {
+                comfy_table::Cell::new(&track.artist)
+                    .fg(comfy_table::Color::Rgb { r: theme::COLOR_PRIMARY.0, g: theme::COLOR_PRIMARY.1, b: theme::COLOR_PRIMARY.2 })
+                    .add_attribute(comfy_table::Attribute::Bold)
+            } else {
+                comfy_table::Cell::new(&track.artist)
+                    .fg(comfy_table::Color::Rgb { r: theme::COLOR_DIM.0, g: theme::COLOR_DIM.1, b: theme::COLOR_DIM.2 })
+            };
+
+            let dur_cell = if is_selected {
+                comfy_table::Cell::new(dur_str)
+                    .fg(comfy_table::Color::Rgb { r: theme::COLOR_PRIMARY.0, g: theme::COLOR_PRIMARY.1, b: theme::COLOR_PRIMARY.2 })
+                    .add_attribute(comfy_table::Attribute::Bold)
+            } else {
+                comfy_table::Cell::new(dur_str)
+                    .fg(comfy_table::Color::Rgb { r: theme::COLOR_DIM.0, g: theme::COLOR_DIM.1, b: theme::COLOR_DIM.2 })
+            };
+
+            table.add_row(vec![num_cell, title_cell, artist_cell, dur_cell]);
+        }
+
+        // Add Go Back row
+        let is_selected = selected_idx == tracks.len();
+        let num_cell = if is_selected {
+            comfy_table::Cell::new("> 🔙")
+                .add_attribute(comfy_table::Attribute::Bold)
+        } else {
+            comfy_table::Cell::new("  🔙")
+        };
+        let label_cell = if is_selected {
+            comfy_table::Cell::new(go_back_label)
+                .fg(comfy_table::Color::Rgb { r: theme::COLOR_PRIMARY.0, g: theme::COLOR_PRIMARY.1, b: theme::COLOR_PRIMARY.2 })
+                .add_attribute(comfy_table::Attribute::Bold)
+        } else {
+            comfy_table::Cell::new(go_back_label)
+                .fg(comfy_table::Color::Rgb { r: theme::COLOR_DIM.0, g: theme::COLOR_DIM.1, b: theme::COLOR_DIM.2 })
+        };
+        table.add_row(vec![
+            num_cell,
+            label_cell,
+            comfy_table::Cell::new(""),
+            comfy_table::Cell::new(""),
+        ]);
+
+        for line in table.to_string().lines() {
+            println!("  {}", line);
+        }
+
+        println!("\n  {}", theme::style_dim("🎮 Controls: [↑/↓] Move  [Enter] Select  [Q/Esc] Back"));
+
+        if let Event::Key(key_event) = event::read()? {
+            if key_event.kind == event::KeyEventKind::Press || key_event.kind == event::KeyEventKind::Repeat {
+                match key_event.code {
+                    KeyCode::Up | KeyCode::Char('p') | KeyCode::Char('P') => {
+                        selected_idx = (selected_idx + num_options - 1) % num_options;
+                    }
+                    KeyCode::Down | KeyCode::Char('n') | KeyCode::Char('N') => {
+                        selected_idx = (selected_idx + 1) % num_options;
+                    }
+                    KeyCode::Enter => {
+                        if selected_idx == tracks.len() {
+                            return Ok(None);
+                        } else {
+                            return Ok(Some(selected_idx));
+                        }
+                    }
+                    KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => {
+                        return Ok(None);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+fn interact_history_select(
+    prompt: &str,
+    headers: Vec<&str>,
+    history: &[crate::db::HistoryEntry],
+    go_back_label: &str,
+) -> Result<Option<usize>> {
+    let mut selected_idx = 0;
+    let num_options = history.len() + 1;
+
+    let _guard = RawModeGuard::new()?;
+
+    loop {
+        clear_screen();
+        println!("  ❓ {}\n", theme::style_primary(prompt));
+
+        let mut table = theme::create_styled_table();
+        table.set_header(headers.iter().map(|h| theme::style_header_cell(h)).collect::<Vec<_>>());
+
+        for (i, entry) in history.iter().enumerate() {
+            let is_selected = i == selected_idx;
+            let short_date = if entry.played_at.len() > 19 {
+                &entry.played_at[..19]
+            } else {
+                &entry.played_at
+            };
+
+            let num_cell = if is_selected {
+                comfy_table::Cell::new(format!("> {}", i + 1))
+                    .fg(comfy_table::Color::Rgb { r: theme::COLOR_PRIMARY.0, g: theme::COLOR_PRIMARY.1, b: theme::COLOR_PRIMARY.2 })
+                    .add_attribute(comfy_table::Attribute::Bold)
+            } else {
+                comfy_table::Cell::new(format!("  {}", i + 1))
+                    .fg(comfy_table::Color::Rgb { r: theme::COLOR_DIM.0, g: theme::COLOR_DIM.1, b: theme::COLOR_DIM.2 })
+            };
+
+            let title_cell = if is_selected {
+                comfy_table::Cell::new(&entry.title)
+                    .fg(comfy_table::Color::Rgb { r: theme::COLOR_ACCENT.0, g: theme::COLOR_ACCENT.1, b: theme::COLOR_ACCENT.2 })
+                    .add_attribute(comfy_table::Attribute::Bold)
+            } else {
+                comfy_table::Cell::new(&entry.title)
+                    .fg(comfy_table::Color::Rgb { r: theme::COLOR_DIM.0, g: theme::COLOR_DIM.1, b: theme::COLOR_DIM.2 })
+            };
+
+            let artist_cell = if is_selected {
+                comfy_table::Cell::new(&entry.artist)
+                    .fg(comfy_table::Color::Rgb { r: theme::COLOR_PRIMARY.0, g: theme::COLOR_PRIMARY.1, b: theme::COLOR_PRIMARY.2 })
+                    .add_attribute(comfy_table::Attribute::Bold)
+            } else {
+                comfy_table::Cell::new(&entry.artist)
+                    .fg(comfy_table::Color::Rgb { r: theme::COLOR_DIM.0, g: theme::COLOR_DIM.1, b: theme::COLOR_DIM.2 })
+            };
+
+            let date_cell = if is_selected {
+                comfy_table::Cell::new(short_date)
+                    .fg(comfy_table::Color::Rgb { r: theme::COLOR_PRIMARY.0, g: theme::COLOR_PRIMARY.1, b: theme::COLOR_PRIMARY.2 })
+                    .add_attribute(comfy_table::Attribute::Bold)
+            } else {
+                comfy_table::Cell::new(short_date)
+                    .fg(comfy_table::Color::Rgb { r: theme::COLOR_DIM.0, g: theme::COLOR_DIM.1, b: theme::COLOR_DIM.2 })
+            };
+
+            table.add_row(vec![num_cell, title_cell, artist_cell, date_cell]);
+        }
+
+        // Add Go Back row
+        let is_selected = selected_idx == history.len();
+        let num_cell = if is_selected {
+            comfy_table::Cell::new("> 🔙")
+                .add_attribute(comfy_table::Attribute::Bold)
+        } else {
+            comfy_table::Cell::new("  🔙")
+        };
+        let label_cell = if is_selected {
+            comfy_table::Cell::new(go_back_label)
+                .fg(comfy_table::Color::Rgb { r: theme::COLOR_PRIMARY.0, g: theme::COLOR_PRIMARY.1, b: theme::COLOR_PRIMARY.2 })
+                .add_attribute(comfy_table::Attribute::Bold)
+        } else {
+            comfy_table::Cell::new(go_back_label)
+                .fg(comfy_table::Color::Rgb { r: theme::COLOR_DIM.0, g: theme::COLOR_DIM.1, b: theme::COLOR_DIM.2 })
+        };
+        table.add_row(vec![
+            num_cell,
+            label_cell,
+            comfy_table::Cell::new(""),
+            comfy_table::Cell::new(""),
+        ]);
+
+        for line in table.to_string().lines() {
+            println!("  {}", line);
+        }
+
+        println!("\n  {}", theme::style_dim("🎮 Controls: [↑/↓] Move  [Enter] Select  [Q/Esc] Back"));
+
+        if let Event::Key(key_event) = event::read()? {
+            if key_event.kind == event::KeyEventKind::Press || key_event.kind == event::KeyEventKind::Repeat {
+                match key_event.code {
+                    KeyCode::Up | KeyCode::Char('p') | KeyCode::Char('P') => {
+                        selected_idx = (selected_idx + num_options - 1) % num_options;
+                    }
+                    KeyCode::Down | KeyCode::Char('n') | KeyCode::Char('N') => {
+                        selected_idx = (selected_idx + 1) % num_options;
+                    }
+                    KeyCode::Enter => {
+                        if selected_idx == history.len() {
+                            return Ok(None);
+                        } else {
+                            return Ok(Some(selected_idx));
+                        }
+                    }
+                    KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => {
+                        return Ok(None);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
 async fn run_search_and_play(config: &Config, db: &Db, client: &NetworkClient, current_volume: &mut f32, debug: bool) -> Result<()> {
     loop {
         clear_screen();
@@ -724,62 +963,15 @@ async fn run_search_and_play(config: &Config, db: &Db, client: &NetworkClient, c
         }
 
         loop {
-            clear_screen();
-            
-            let mut table = theme::create_styled_table();
-            table.set_header(vec![
-                theme::style_header_cell("#"),
-                theme::style_header_cell("Title"),
-                theme::style_header_cell("Artist"),
-                theme::style_header_cell("Duration"),
-            ]);
-
-            for (i, track) in tracks.iter().enumerate() {
-                let dur_str = match track.duration_secs {
-                    Some(d) => format_duration(Duration::from_secs(d as u64)),
-                    None => "--:--".to_string(),
-                };
-                table.add_row(vec![
-                    theme::style_data_cell(&(i + 1).to_string(), false),
-                    theme::style_data_cell(&track.title, true),
-                    theme::style_data_cell(&track.artist, false),
-                    theme::style_data_cell(&dur_str, false),
-                ]);
-            }
-            // Add Go Back row
-            table.add_row(vec![
-                theme::style_data_cell("🔙", false),
-                theme::style_data_cell("Search again / Go back", false),
-                theme::style_data_cell("", false),
-                theme::style_data_cell("", false),
-            ]);
-
-            let table_str = table.to_string();
-            let lines: Vec<&str> = table_str.lines().collect();
-
-            // Print top border, header, and header separator
-            for line in &lines[0..3] {
-                println!("  {}", line);
-            }
-
-            // The data rows are printed inside dialoguer select
-            let select_items = &lines[3..3 + tracks.len() + 1];
-
-            let selection = dialoguer::Select::with_theme(&theme::get_dialoguer_theme())
-                .with_prompt("Select track to play")
-                .default(0)
-                .items(select_items)
-                .max_length(tracks.len() + 1)
-                .interact()?;
-
-            // Print the bottom border of the table
-            if 3 + tracks.len() + 1 < lines.len() {
-                println!("  {}", lines[3 + tracks.len() + 1]);
-            }
-
-            if selection == tracks.len() {
-                break;
-            }
+            let selection = match interact_table_select(
+                "Select track to play",
+                vec!["#", "Title", "Artist", "Duration"],
+                &tracks,
+                "Search again / Go back",
+            )? {
+                Some(idx) => idx,
+                None => break,
+            };
 
             let selected_track = tracks[selection].clone();
             println!("\n  📻 Fetching autoplay recommendations...");
@@ -813,61 +1005,15 @@ async fn run_history(config: &Config, db: &Db, client: &NetworkClient, current_v
             return Ok(());
         }
 
-        let mut table = theme::create_styled_table();
-        table.set_header(vec![
-            theme::style_header_cell("#"),
-            theme::style_header_cell("Title"),
-            theme::style_header_cell("Artist"),
-            theme::style_header_cell("Played At"),
-        ]);
-
-        for (i, entry) in history.iter().enumerate() {
-            let short_date = if entry.played_at.len() > 19 {
-                &entry.played_at[..19]
-            } else {
-                &entry.played_at
-            };
-            table.add_row(vec![
-                theme::style_data_cell(&(i + 1).to_string(), false),
-                theme::style_data_cell(&entry.title, true),
-                theme::style_data_cell(&entry.artist, false),
-                theme::style_data_cell(short_date, false),
-            ]);
-        }
-        // Add Go Back row
-        table.add_row(vec![
-            theme::style_data_cell("🔙", false),
-            theme::style_data_cell("Go back", false),
-            theme::style_data_cell("", false),
-            theme::style_data_cell("", false),
-        ]);
-
-        let table_str = table.to_string();
-        let lines: Vec<&str> = table_str.lines().collect();
-
-        // Print top border, header, and header separator
-        for line in &lines[0..3] {
-            println!("  {}", line);
-        }
-
-        // The data rows are printed inside dialoguer select
-        let select_items = &lines[3..3 + history.len() + 1];
-
-        let selection = dialoguer::Select::with_theme(&theme::get_dialoguer_theme())
-            .with_prompt("Select track to replay")
-            .default(0)
-            .items(select_items)
-            .max_length(history.len() + 1)
-            .interact()?;
-
-        // Print the bottom border of the table
-        if 3 + history.len() + 1 < lines.len() {
-            println!("  {}", lines[3 + history.len() + 1]);
-        }
-
-        if selection == history.len() {
-            break;
-        }
+        let selection = match interact_history_select(
+            "Select track to replay",
+            vec!["#", "Title", "Artist", "Played At"],
+            &history,
+            "Go back",
+        )? {
+            Some(idx) => idx,
+            None => break,
+        };
 
         let entry = &history[selection];
         let track = TrackInfo {
