@@ -1,0 +1,37 @@
+[package]
+name = "ytm-cli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Async Runtime
+tokio = { version = "1.35", features = ["full"] }
+
+# CLI Argument Parsing & Stdin Controls
+clap = { version = "4.4", features = ["derive"] }
+crossterm = { version = "0.27", features = ["event-stream"] }
+indicatif = "0.17" # For command-line progress bar
+
+# API & Streaming
+ytmapi-rs = "0.0.12" # Wrapper for InnerTube API
+rustypipe = "0.11.4"  # Video/Audio streaming URL extractor
+reqwest = { version = "0.11", features = ["json", "stream"] }
+
+# Audio Playback
+rodio = { version = "0.19", default-features = false, features = ["symphonia-all"] }
+
+# Database
+rusqlite = { version = "0.30", features = ["bundled"] }
+
+# Utilities
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+directories = "5.0"
+log = "0.4"
+simplelog = "0.12"
+chrono = { version = "0.4", features = ["serde"] }
+dialoguer = { version = "0.11", features = ["fuzzy-select"] }
+comfy-table = "7.1"
+owo-colors = "4.0"
+

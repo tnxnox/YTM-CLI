@@ -1,0 +1,12 @@
+/target
+/venv
+/venv_temp
+rustypipe_cache.json
+rustypipe_reports/
+*.mp3
+*.m4a
+*.opus
+*.ogg
+*.ogg.ogg
+test
+/base.js
