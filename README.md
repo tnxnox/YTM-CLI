@@ -15,7 +15,7 @@ A lightweight, high-performance, and feature-rich YouTube Music client for the t
   - Rendered at ~25 FPS across 5 terminal rows using Unicode block elements (` ▂▃▄▅▆▇█`).
 - **📻 Smart Autoplay (Infinite Queue):** Automatically creates a radio queue based on your selected track and dynamically fetches continuations in the background as you play.
 - **⚡ Background Prefetching:** Automatically pre-downloads the next track in the queue in the background for zero-latency, gapless transitions.
-- **💾 Local Caching:** Audio is cached locally as `.mp3` files (avoiding Symphonia decoder seek panics on M4A streams) and tracked in a local SQLite database.
+- **💾 Local Caching:** Audio is cached locally as `.ogg` files (avoiding seeking distortion and decoder panics) and tracked in a local SQLite database.
 - **🔑 Account Integration:** Seamless cookie extraction from local browsers (Firefox, Chrome, Brave, Chromium, Edge, Opera, Vivaldi) to load and play your private library playlists.
 - **🚀 Performance-Optimized:**
   - Zero-allocation lazy text styling for the terminal progress bar redraw loop.
@@ -44,7 +44,7 @@ During playback, you can control the music in real time:
 ### Dependencies
 You must have the following tools installed and available in your `PATH`:
 1. [yt-dlp](https://github.com/yt-dlp/yt-dlp) (used for audio extraction)
-2. `ffmpeg` (required by `yt-dlp` for MP3 extraction)
+2. `ffmpeg` (required by `yt-dlp` for Vorbis extraction)
 
 ### Build
 Clone the repository and build the binary:

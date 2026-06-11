@@ -356,13 +356,13 @@ async fn play_track(
     let artist = &track.artist;
     let total_duration = track.duration_secs.map(|d| Duration::from_secs(d as u64));
 
-    let cache_file = config.cache_dir.join(format!("{}.mp3", video_id));
+    let cache_file = config.cache_dir.join(format!("{}.ogg", video_id));
     let player = AudioPlayer::new()?;
 
     let cached = db.get_cached_track(video_id)?;
     let use_cache = if let Some(ref c) = cached {
         let path = Path::new(&c.file_path);
-        path.exists() && path.extension().map(|ext| ext == "mp3").unwrap_or(false)
+        path.exists() && path.extension().map(|ext| ext == "ogg").unwrap_or(false)
     } else {
         false
     };
@@ -421,7 +421,7 @@ async fn play_track(
             "--js-runtimes", &config.get_js_runtime_arg(),
             "--remote-components", "ejs:github",
             "-x",
-            "--audio-format", "mp3",
+            "--audio-format", "vorbis",
             &format!("https://www.youtube.com/watch?v={}", video_id),
             "-o", &cache_file.to_string_lossy(),
         ]);
@@ -581,7 +581,7 @@ fn spawn_prefetch(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let video_id = &track.id;
-        let cache_file = config.cache_dir.join(format!("{}.mp3", video_id));
+        let cache_file = config.cache_dir.join(format!("{}.ogg", video_id));
 
         // Check if already exists on disk
         if cache_file.exists() {
@@ -596,7 +596,7 @@ fn spawn_prefetch(
                 "--js-runtimes", &config.get_js_runtime_arg(),
                 "--remote-components", "ejs:github",
                 "-x",
-                "--audio-format", "mp3",
+                "--audio-format", "vorbis",
                 &format!("https://www.youtube.com/watch?v={}", video_id),
                 "-o", &cache_file.to_string_lossy(),
             ]);
