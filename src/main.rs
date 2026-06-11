@@ -725,29 +725,63 @@ async fn run_search_and_play(config: &Config, db: &Db, client: &NetworkClient, c
 
         loop {
             clear_screen();
-            print_track_table(&tracks);
+            
+            let mut table = theme::create_styled_table();
+            table.set_header(vec![
+                theme::style_header_cell("#"),
+                theme::style_header_cell("Title"),
+                theme::style_header_cell("Artist"),
+                theme::style_header_cell("Duration"),
+            ]);
 
-            let mut track_choices: Vec<String> = tracks.iter().map(|t| {
-                let dur = match t.duration_secs {
+            for (i, track) in tracks.iter().enumerate() {
+                let dur_str = match track.duration_secs {
                     Some(d) => format_duration(Duration::from_secs(d as u64)),
                     None => "--:--".to_string(),
                 };
-                format!("{} - {} [{}]", t.title, t.artist, dur)
-            }).collect();
-            track_choices.push("🔙 Search again / Go back".to_string());
+                table.add_row(vec![
+                    theme::style_data_cell(&(i + 1).to_string(), false),
+                    theme::style_data_cell(&track.title, true),
+                    theme::style_data_cell(&track.artist, false),
+                    theme::style_data_cell(&dur_str, false),
+                ]);
+            }
+            // Add Go Back row
+            table.add_row(vec![
+                theme::style_data_cell("🔙", false),
+                theme::style_data_cell("Search again / Go back", false),
+                theme::style_data_cell("", false),
+                theme::style_data_cell("", false),
+            ]);
+
+            let table_str = table.to_string();
+            let lines: Vec<&str> = table_str.lines().collect();
+
+            // Print top border, header, and header separator
+            for line in &lines[0..3] {
+                println!("  {}", line);
+            }
+
+            // The data rows are printed inside dialoguer select
+            let select_items = &lines[3..3 + tracks.len() + 1];
 
             let selection = dialoguer::Select::with_theme(&theme::get_dialoguer_theme())
                 .with_prompt("Select track to play")
                 .default(0)
-                .items(&track_choices)
+                .items(select_items)
                 .interact()?;
+
+            // Print the bottom border of the table
+            if 3 + tracks.len() + 1 < lines.len() {
+                println!("  {}", lines[3 + tracks.len() + 1]);
+            }
 
             if selection == tracks.len() {
                 break;
             }
 
             let selected_track = tracks[selection].clone();
-            println!("  📻 Fetching autoplay recommendations...");
+            println!("\n  📻 Fetching autoplay recommendations...");
             let mut queue = vec![selected_track.clone()];
             let mut autoplay_ctoken = None;
             
@@ -799,18 +833,35 @@ async fn run_history(config: &Config, db: &Db, client: &NetworkClient, current_v
                 theme::style_data_cell(short_date, false),
             ]);
         }
-        println!("{}", table);
+        // Add Go Back row
+        table.add_row(vec![
+            theme::style_data_cell("🔙", false),
+            theme::style_data_cell("Go back", false),
+            theme::style_data_cell("", false),
+            theme::style_data_cell("", false),
+        ]);
 
-        let mut choices: Vec<String> = history.iter().map(|entry| {
-            format!("{} - {}", entry.title, entry.artist)
-        }).collect();
-        choices.push("🔙 Go back".to_string());
+        let table_str = table.to_string();
+        let lines: Vec<&str> = table_str.lines().collect();
+
+        // Print top border, header, and header separator
+        for line in &lines[0..3] {
+            println!("  {}", line);
+        }
+
+        // The data rows are printed inside dialoguer select
+        let select_items = &lines[3..3 + history.len() + 1];
 
         let selection = dialoguer::Select::with_theme(&theme::get_dialoguer_theme())
             .with_prompt("Select track to replay")
             .default(0)
-            .items(&choices)
+            .items(select_items)
             .interact()?;
+
+        // Print the bottom border of the table
+        if 3 + history.len() + 1 < lines.len() {
+            println!("  {}", lines[3 + history.len() + 1]);
+        }
 
         if selection == history.len() {
             break;
@@ -823,7 +874,7 @@ async fn run_history(config: &Config, db: &Db, client: &NetworkClient, current_v
             artist: entry.artist.clone(),
             duration_secs: None,
         };
-        println!("  📻 Fetching autoplay recommendations...");
+        println!("\n  📻 Fetching autoplay recommendations...");
         let mut queue = vec![track.clone()];
         let mut autoplay_ctoken = None;
         
