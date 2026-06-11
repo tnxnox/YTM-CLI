@@ -769,6 +769,7 @@ async fn run_search_and_play(config: &Config, db: &Db, client: &NetworkClient, c
                 .with_prompt("Select track to play")
                 .default(0)
                 .items(select_items)
+                .max_length(tracks.len() + 1)
                 .interact()?;
 
             // Print the bottom border of the table
@@ -856,6 +857,7 @@ async fn run_history(config: &Config, db: &Db, client: &NetworkClient, current_v
             .with_prompt("Select track to replay")
             .default(0)
             .items(select_items)
+            .max_length(history.len() + 1)
             .interact()?;
 
         // Print the bottom border of the table
