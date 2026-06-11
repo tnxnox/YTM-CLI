@@ -1,5 +1,9 @@
 # 🎧 YTM-CLI: YouTube Music CLI Player
 
+[![Rust](https://img.shields.io/badge/Rust-2021-black?logo=rust)](https://www.rust-lang.org/)
+[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-Support-FF5E5B?logo=kofi)](https://ko-fi.com/thenoix)
+
 A lightweight, high-performance, and feature-rich YouTube Music client for the terminal, written in Rust. It features a modern deep blue / purple command-line interface, a real-time DSP equalizer, and an infinite autoplay queue.
 
 ---
@@ -88,3 +92,15 @@ You can also run one-off commands directly:
   ```bash
   ytm-cli login --browser firefox
   ```
+
+---
+
+## 🤝 Support
+
+If you like the app, you can thank me here:
+
+[![Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/thenoix)
+
+## 📄 License
+
+MIT — see [LICENSE](LICENSE) for the full text.
