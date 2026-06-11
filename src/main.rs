@@ -478,6 +478,7 @@ async fn play_track(
         let _guard = RawModeGuard::new()?;
         let mut last_tick = Instant::now();
         let mut elapsed = Duration::from_secs(0);
+        let mut last_seek = Instant::now() - Duration::from_secs(1);
 
         while !sink.empty() {
             let now = Instant::now();
@@ -521,20 +522,28 @@ async fn play_track(
                                 }
                             }
                             KeyCode::Left => {
-                                let new_pos = elapsed.saturating_sub(Duration::from_secs(10));
-                                if sink.try_seek(new_pos).is_ok() {
-                                    elapsed = new_pos;
+                                let now_seek = Instant::now();
+                                if now_seek.duration_since(last_seek) >= Duration::from_millis(250) {
+                                    let new_pos = elapsed.saturating_sub(Duration::from_secs(5));
+                                    if sink.try_seek(new_pos).is_ok() {
+                                        elapsed = new_pos;
+                                        last_seek = now_seek;
+                                    }
                                 }
                             }
                             KeyCode::Right => {
-                                let new_pos = elapsed + Duration::from_secs(10);
-                                let can_seek = match total_duration {
-                                    Some(total_dur) => new_pos < total_dur,
-                                    None => true,
-                                };
-                                if can_seek {
-                                    if sink.try_seek(new_pos).is_ok() {
-                                        elapsed = new_pos;
+                                let now_seek = Instant::now();
+                                if now_seek.duration_since(last_seek) >= Duration::from_millis(250) {
+                                    let new_pos = elapsed + Duration::from_secs(5);
+                                    let can_seek = match total_duration {
+                                        Some(total_dur) => new_pos < total_dur,
+                                        None => true,
+                                    };
+                                    if can_seek {
+                                        if sink.try_seek(new_pos).is_ok() {
+                                            elapsed = new_pos;
+                                            last_seek = now_seek;
+                                        }
                                     }
                                 }
                             }
