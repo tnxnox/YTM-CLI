@@ -1,27 +1,31 @@
+pub mod audio;
 pub mod config;
 pub mod db;
-pub mod network;
-pub mod audio;
-pub mod theme;
 pub mod discord;
+pub mod network;
+pub mod theme;
 
+use anyhow::Result;
+use clap::{Parser, Subcommand};
+use crossterm::event::{self, Event, KeyCode};
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
+use owo_colors::OwoColorize;
+use rustypipe::model::paginator::ContinuationEndpoint;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use anyhow::Result;
-use clap::{Parser, Subcommand};
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
-use crossterm::event::{self, KeyCode, Event};
-use rustypipe::model::paginator::ContinuationEndpoint;
-use owo_colors::OwoColorize;
 
+use crate::audio::AudioPlayer;
 use crate::config::Config;
 use crate::db::Db;
-use crate::network::{NetworkClient, TrackInfo, AlbumInfo};
-use crate::audio::AudioPlayer;
+use crate::network::{AlbumInfo, NetworkClient, TrackInfo};
 
 #[derive(Parser)]
-#[command(name = "ytm-cli", version = "0.1.0", about = "YouTube Music CLI client")]
+#[command(
+    name = "ytm-cli",
+    version = "0.1.0",
+    about = "YouTube Music CLI client"
+)]
 struct Cli {
     /// Enable verbose debug logging to terminal
     #[arg(short, long, global = true)]
@@ -156,12 +160,13 @@ fn draw_progress_bar(
         Some(t) => format_duration(t),
         None => "??:??".to_string(),
     };
-    
+
     let bar_width = 30;
     let mut filled = 0;
     if let Some(t) = total {
         if t.as_secs() > 0 {
-            filled = ((elapsed.as_secs_f64() / t.as_secs_f64()) * bar_width as f64).round() as usize;
+            filled =
+                ((elapsed.as_secs_f64() / t.as_secs_f64()) * bar_width as f64).round() as usize;
             filled = filled.min(bar_width);
         }
     }
@@ -176,10 +181,16 @@ fn draw_progress_bar(
 
     // Unfilled portion in dark slate/blue
     let unfilled_len = bar_width.saturating_sub(filled).saturating_sub(1);
-    let unfilled_str = std::iter::repeat("─").take(unfilled_len).collect::<String>();
+    let unfilled_str = std::iter::repeat("─")
+        .take(unfilled_len)
+        .collect::<String>();
     let unfilled_styled = theme::style_secondary(&unfilled_str);
 
-    let state_icon = if is_paused { "⏸ PAUSED" } else { "▶ PLAYING" };
+    let state_icon = if is_paused {
+        "⏸ PAUSED"
+    } else {
+        "▶ PLAYING"
+    };
     let state_style = if is_paused {
         theme::style_dim_style()
     } else {
@@ -223,7 +234,7 @@ fn draw_progress_bar(
     }
 
     let blocks = [' ', ' ', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-    
+
     // We will build 5 rows of the visualizer (top row index 0 to bottom row index 4)
     let num_rows = 5;
     let mut visualizer_rows = vec![String::new(); num_rows];
@@ -249,20 +260,35 @@ fn draw_progress_bar(
                 let (r, g, b) = if col_ratio < 0.5 {
                     let t = col_ratio * 2.0;
                     (
-                        (theme::COLOR_SECONDARY.0 as f32 + t * (theme::COLOR_PRIMARY.0 as f32 - theme::COLOR_SECONDARY.0 as f32)).round() as u8,
-                        (theme::COLOR_SECONDARY.1 as f32 + t * (theme::COLOR_PRIMARY.1 as f32 - theme::COLOR_SECONDARY.1 as f32)).round() as u8,
-                        (theme::COLOR_SECONDARY.2 as f32 + t * (theme::COLOR_PRIMARY.2 as f32 - theme::COLOR_SECONDARY.2 as f32)).round() as u8,
+                        (theme::COLOR_SECONDARY.0 as f32
+                            + t * (theme::COLOR_PRIMARY.0 as f32 - theme::COLOR_SECONDARY.0 as f32))
+                            .round() as u8,
+                        (theme::COLOR_SECONDARY.1 as f32
+                            + t * (theme::COLOR_PRIMARY.1 as f32 - theme::COLOR_SECONDARY.1 as f32))
+                            .round() as u8,
+                        (theme::COLOR_SECONDARY.2 as f32
+                            + t * (theme::COLOR_PRIMARY.2 as f32 - theme::COLOR_SECONDARY.2 as f32))
+                            .round() as u8,
                     )
                 } else {
                     let t = (col_ratio - 0.5) * 2.0;
                     (
-                        (theme::COLOR_PRIMARY.0 as f32 + t * (theme::COLOR_ACCENT.0 as f32 - theme::COLOR_PRIMARY.0 as f32)).round() as u8,
-                        (theme::COLOR_PRIMARY.1 as f32 + t * (theme::COLOR_ACCENT.1 as f32 - theme::COLOR_PRIMARY.1 as f32)).round() as u8,
-                        (theme::COLOR_PRIMARY.2 as f32 + t * (theme::COLOR_ACCENT.2 as f32 - theme::COLOR_PRIMARY.2 as f32)).round() as u8,
+                        (theme::COLOR_PRIMARY.0 as f32
+                            + t * (theme::COLOR_ACCENT.0 as f32 - theme::COLOR_PRIMARY.0 as f32))
+                            .round() as u8,
+                        (theme::COLOR_PRIMARY.1 as f32
+                            + t * (theme::COLOR_ACCENT.1 as f32 - theme::COLOR_PRIMARY.1 as f32))
+                            .round() as u8,
+                        (theme::COLOR_PRIMARY.2 as f32
+                            + t * (theme::COLOR_ACCENT.2 as f32 - theme::COLOR_PRIMARY.2 as f32))
+                            .round() as u8,
                     )
                 };
 
-                let styled_char = block_char.to_string().color(owo_colors::Rgb(r, g, b)).to_string();
+                let styled_char = block_char
+                    .to_string()
+                    .color(owo_colors::Rgb(r, g, b))
+                    .to_string();
                 row_str.push_str(&styled_char);
             }
             visualizer_rows[num_rows - 1 - row_idx] = row_str;
@@ -272,34 +298,23 @@ fn draw_progress_bar(
     // Carriage return and clear line for progress bar
     print!(
         "\r\x1b[K  {}  [ {}{}{} ]  {}  {}",
-        state_styled,
-        filled_styled,
-        thumb_styled,
-        unfilled_styled,
-        time_styled,
-        vol_styled
+        state_styled, filled_styled, thumb_styled, unfilled_styled, time_styled, vol_styled
     );
 
     if visualizer.is_some() {
         // 1. Print two blank spacer lines to put it lower
         print!("\n\r\x1b[K\n\r\x1b[K");
-        
+
         // 2. Print the five equalizer rows
         for row_str in &visualizer_rows {
-            print!(
-                "\n\r\x1b[K{:indent$}{}",
-                "",
-                row_str,
-                indent = left_padding
-            );
+            print!("\n\r\x1b[K{:indent$}{}", "", row_str, indent = left_padding);
         }
         // Cursor back up 7 lines (2 spacers + 5 rows) and carriage return
         print!("\x1b[7A\r");
     }
-    
+
     std::io::stdout().flush().ok();
 }
-
 
 /// Print a numbered table of tracks.
 fn print_track_table(tracks: &[TrackInfo]) {
@@ -363,7 +378,11 @@ fn shuffle_tracks(tracks: &mut [TrackInfo]) {
     let m: u64 = 2u64.pow(32);
 
     let mut next_random = move || {
-        seed = (a.wrapping_mul(seed).wrapping_add(seed.rotate_left(11)).wrapping_add(c)) % m;
+        seed = (a
+            .wrapping_mul(seed)
+            .wrapping_add(seed.rotate_left(11))
+            .wrapping_add(c))
+            % m;
         seed
     };
 
@@ -396,11 +415,19 @@ async fn play_track(
             clear_screen();
             let track_name = format!("{} - {}", title, artist);
             if let Some((idx, total)) = queue_info {
-                println!("  💿 [{}/{}] Playing (Discord Mode): {}", idx + 1, total, theme::style_primary(&track_name));
+                println!(
+                    "  💿 [{}/{}] Playing (Discord Mode): {}",
+                    idx + 1,
+                    total,
+                    theme::style_primary(&track_name)
+                );
             } else {
-                println!("  💿 Playing (Discord Mode): {}", theme::style_primary(&track_name));
+                println!(
+                    "  💿 Playing (Discord Mode): {}",
+                    theme::style_primary(&track_name)
+                );
             }
-            
+
             let controls_help = if queue_info.is_some() {
                 "  🎮 Controls: [Space] Play/Pause  [N] Skip  [P] Prev  [Q] Stop/Back"
             } else {
@@ -409,8 +436,14 @@ async fn play_track(
             println!("{}", theme::style_dim(controls_help));
 
             let cmd_text = format!("m!play https://www.youtube.com/watch?v={}", video_id);
-            if let Err(e) = crate::discord::send_discord_command(&discord.token, &discord.channel_id, &cmd_text).await {
-                println!("  ❌ Failed to send command to Discord: {}", theme::style_error(&e.to_string()));
+            if let Err(e) =
+                crate::discord::send_discord_command(&discord.token, &discord.channel_id, &cmd_text)
+                    .await
+            {
+                println!(
+                    "  ❌ Failed to send command to Discord: {}",
+                    theme::style_error(&e.to_string())
+                );
                 press_enter_to_continue();
                 return Ok(PlaybackControl::Quit);
             }
@@ -437,29 +470,55 @@ async fn play_track(
 
                     if event::poll(Duration::from_millis(100))? {
                         if let Event::Key(key_event) = event::read()? {
-                            if key_event.kind == event::KeyEventKind::Press || key_event.kind == event::KeyEventKind::Repeat {
+                            if key_event.kind == event::KeyEventKind::Press
+                                || key_event.kind == event::KeyEventKind::Repeat
+                            {
                                 match key_event.code {
                                     KeyCode::Char(' ') => {
                                         is_paused = !is_paused;
                                         let cmd = if is_paused { "m!pause" } else { "m!resume" };
-                                        crate::discord::send_discord_command(&discord.token, &discord.channel_id, cmd).await.ok();
+                                        crate::discord::send_discord_command(
+                                            &discord.token,
+                                            &discord.channel_id,
+                                            cmd,
+                                        )
+                                        .await
+                                        .ok();
                                     }
                                     KeyCode::Char('n') | KeyCode::Char('N') => {
                                         if queue_info.is_some() {
-                                            crate::discord::send_discord_command(&discord.token, &discord.channel_id, "m!skip").await.ok();
+                                            crate::discord::send_discord_command(
+                                                &discord.token,
+                                                &discord.channel_id,
+                                                "m!skip",
+                                            )
+                                            .await
+                                            .ok();
                                             control = PlaybackControl::Next;
                                             break;
                                         }
                                     }
                                     KeyCode::Char('p') | KeyCode::Char('P') => {
                                         if queue_info.is_some() {
-                                            crate::discord::send_discord_command(&discord.token, &discord.channel_id, "m!skip").await.ok();
+                                            crate::discord::send_discord_command(
+                                                &discord.token,
+                                                &discord.channel_id,
+                                                "m!skip",
+                                            )
+                                            .await
+                                            .ok();
                                             control = PlaybackControl::Prev;
                                             break;
                                         }
                                     }
                                     KeyCode::Char('q') | KeyCode::Esc => {
-                                        crate::discord::send_discord_command(&discord.token, &discord.channel_id, "m!stop").await.ok();
+                                        crate::discord::send_discord_command(
+                                            &discord.token,
+                                            &discord.channel_id,
+                                            "m!stop",
+                                        )
+                                        .await
+                                        .ok();
                                         control = PlaybackControl::Quit;
                                         break;
                                     }
@@ -469,7 +528,7 @@ async fn play_track(
                         }
                     }
                 }
-                
+
                 print!("\r\x1b[K");
                 std::io::stdout().flush().ok();
             }
@@ -495,9 +554,17 @@ async fn play_track(
     let (sink, visualizer_shared) = if use_cache {
         let track_name = format!("{} - {}", title, artist);
         if let Some((idx, total)) = queue_info {
-            println!("  💿 [{}/{}] Playing (cached): {}", idx + 1, total, theme::style_primary(&track_name));
+            println!(
+                "  💿 [{}/{}] Playing (cached): {}",
+                idx + 1,
+                total,
+                theme::style_primary(&track_name)
+            );
         } else {
-            println!("  💿 Playing (cached): {}", theme::style_primary(&track_name));
+            println!(
+                "  💿 Playing (cached): {}",
+                theme::style_primary(&track_name)
+            );
         }
         let (sink, _total_dur, vis) = player.play_local(cache_file.clone())?;
         sink.set_volume(*current_volume);
@@ -527,7 +594,12 @@ async fn play_track(
             Some(spinner)
         } else {
             if let Some((idx, total)) = queue_info {
-                println!("  ⏳ [{}/{}] Buffering: {}", idx + 1, total, theme::style_primary(&track_name));
+                println!(
+                    "  ⏳ [{}/{}] Buffering: {}",
+                    idx + 1,
+                    total,
+                    theme::style_primary(&track_name)
+                );
             } else {
                 println!("  ⏳ Buffering: {}", theme::style_primary(&track_name));
             }
@@ -540,17 +612,28 @@ async fn play_track(
         let mut cmd = tokio::process::Command::new(&yt_dlp_path);
         cmd.args(&[
             "--no-warnings",
-            "--js-runtimes", &config.get_js_runtime_arg(),
-            "--remote-components", "ejs:github",
+            "--js-runtimes",
+            &config.get_js_runtime_arg(),
+            "--remote-components",
+            "ejs:github",
             "-x",
-            "--audio-format", "flac",
+            "--audio-format",
+            "flac",
             &format!("https://www.youtube.com/watch?v={}", video_id),
-            "-o", &config.cache_dir.join(format!("{}.%(ext)s", video_id)).to_string_lossy(),
+            "-o",
+            &config
+                .cache_dir
+                .join(format!("{}.%(ext)s", video_id))
+                .to_string_lossy(),
         ]);
         let browser = config.get_browser();
         if let Some(ref b) = browser {
             cmd.arg("--cookies-from-browser").arg(b);
-        } else if config.cookies_path.exists() && std::fs::metadata(&config.cookies_path).map(|m| m.len() > 0).unwrap_or(false) {
+        } else if config.cookies_path.exists()
+            && std::fs::metadata(&config.cookies_path)
+                .map(|m| m.len() > 0)
+                .unwrap_or(false)
+        {
             cmd.arg("--cookies").arg(&config.cookies_path);
         }
         cmd.kill_on_drop(true);
@@ -578,7 +661,9 @@ async fn play_track(
         // Register cached track in DB
         let duration_u32 = total_duration.map(|d| d.as_secs() as u32).unwrap_or(0);
         let file_path_str = cache_file.to_string_lossy().to_string();
-        if let Err(e) = db.insert_cached_track(video_id, title, artist, duration_u32, &file_path_str) {
+        if let Err(e) =
+            db.insert_cached_track(video_id, title, artist, duration_u32, &file_path_str)
+        {
             eprintln!("  Failed to register cached track in DB: {}", e);
         }
 
@@ -614,11 +699,19 @@ async fn play_track(
                 elapsed += delta;
             }
 
-            draw_progress_bar(elapsed, total_duration, sink.volume(), sink.is_paused(), Some(&visualizer_shared));
+            draw_progress_bar(
+                elapsed,
+                total_duration,
+                sink.volume(),
+                sink.is_paused(),
+                Some(&visualizer_shared),
+            );
 
             if event::poll(Duration::from_millis(40))? {
                 if let Event::Key(key_event) = event::read()? {
-                    if key_event.kind == event::KeyEventKind::Press || key_event.kind == event::KeyEventKind::Repeat {
+                    if key_event.kind == event::KeyEventKind::Press
+                        || key_event.kind == event::KeyEventKind::Repeat
+                    {
                         match key_event.code {
                             KeyCode::Char(' ') => {
                                 if sink.is_paused() {
@@ -648,7 +741,8 @@ async fn play_track(
                             }
                             KeyCode::Left => {
                                 let now_seek = Instant::now();
-                                if now_seek.duration_since(last_seek) >= Duration::from_millis(250) {
+                                if now_seek.duration_since(last_seek) >= Duration::from_millis(250)
+                                {
                                     let new_pos = elapsed.saturating_sub(Duration::from_secs(5));
                                     match sink.try_seek(new_pos) {
                                         Ok(_) => {
@@ -664,7 +758,8 @@ async fn play_track(
                             }
                             KeyCode::Right => {
                                 let now_seek = Instant::now();
-                                if now_seek.duration_since(last_seek) >= Duration::from_millis(250) {
+                                if now_seek.duration_since(last_seek) >= Duration::from_millis(250)
+                                {
                                     let new_pos = elapsed + Duration::from_secs(5);
                                     let can_seek = match total_duration {
                                         Some(total_dur) => new_pos < total_dur,
@@ -711,11 +806,7 @@ async fn play_track(
     Ok(control)
 }
 
-fn spawn_prefetch(
-    track: TrackInfo,
-    config: Config,
-    db: Db,
-) -> tokio::task::JoinHandle<()> {
+fn spawn_prefetch(track: TrackInfo, config: Config, db: Db) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let video_id = &track.id;
         let cache_file = config.cache_dir.join(format!("{}.flac", video_id));
@@ -730,17 +821,28 @@ fn spawn_prefetch(
             let mut cmd = tokio::process::Command::new(&yt_dlp_path);
             cmd.args(&[
                 "--no-warnings",
-                "--js-runtimes", &config.get_js_runtime_arg(),
-                "--remote-components", "ejs:github",
+                "--js-runtimes",
+                &config.get_js_runtime_arg(),
+                "--remote-components",
+                "ejs:github",
                 "-x",
-                "--audio-format", "flac",
+                "--audio-format",
+                "flac",
                 &format!("https://www.youtube.com/watch?v={}", video_id),
-                "-o", &config.cache_dir.join(format!("{}.%(ext)s", video_id)).to_string_lossy(),
+                "-o",
+                &config
+                    .cache_dir
+                    .join(format!("{}.%(ext)s", video_id))
+                    .to_string_lossy(),
             ]);
             let browser = config.get_browser();
             if let Some(ref b) = browser {
                 cmd.arg("--cookies-from-browser").arg(b);
-            } else if config.cookies_path.exists() && std::fs::metadata(&config.cookies_path).map(|m| m.len() > 0).unwrap_or(false) {
+            } else if config.cookies_path.exists()
+                && std::fs::metadata(&config.cookies_path)
+                    .map(|m| m.len() > 0)
+                    .unwrap_or(false)
+            {
                 cmd.arg("--cookies").arg(&config.cookies_path);
             }
             cmd.kill_on_drop(true);
@@ -749,7 +851,13 @@ fn spawn_prefetch(
                 if output.status.success() {
                     let duration_u32 = track.duration_secs.unwrap_or(0);
                     let file_path_str = cache_file.to_string_lossy().to_string();
-                    let _ = db.insert_cached_track(video_id, &track.title, &track.artist, duration_u32, &file_path_str);
+                    let _ = db.insert_cached_track(
+                        video_id,
+                        &track.title,
+                        &track.artist,
+                        duration_u32,
+                        &file_path_str,
+                    );
                 }
             }
         }
@@ -766,7 +874,9 @@ async fn play_queue(
     current_volume: &mut f32,
     debug: bool,
 ) -> Result<()> {
-    if tracks.is_empty() { return Ok(()); }
+    if tracks.is_empty() {
+        return Ok(());
+    }
     let mut tracks = tracks;
     let mut autoplay_ctoken = autoplay_ctoken;
     let mut idx = start_idx;
@@ -818,7 +928,15 @@ async fn play_queue(
         }
 
         let track = &tracks[idx];
-        let control = play_track(track, config, db, Some((idx, tracks.len())), current_volume, debug).await?;
+        let control = play_track(
+            track,
+            config,
+            db,
+            Some((idx, tracks.len())),
+            current_volume,
+            debug,
+        )
+        .await?;
         match control {
             PlaybackControl::Finished | PlaybackControl::Next => {
                 idx += 1;
@@ -867,7 +985,12 @@ fn interact_table_select(
         print!("  ❓ {}\r\n\r\n", theme::style_primary(prompt));
 
         let mut table = theme::create_styled_table();
-        table.set_header(headers.iter().map(|h| theme::style_header_cell(h)).collect::<Vec<_>>());
+        table.set_header(
+            headers
+                .iter()
+                .map(|h| theme::style_header_cell(h))
+                .collect::<Vec<_>>(),
+        );
 
         for (i, track) in tracks.iter().enumerate() {
             let is_selected = i == selected_idx;
@@ -878,38 +1001,66 @@ fn interact_table_select(
 
             let num_cell = if is_selected {
                 comfy_table::Cell::new(format!("> {}", i + 1))
-                    .fg(comfy_table::Color::Rgb { r: theme::COLOR_PRIMARY.0, g: theme::COLOR_PRIMARY.1, b: theme::COLOR_PRIMARY.2 })
+                    .fg(comfy_table::Color::Rgb {
+                        r: theme::COLOR_PRIMARY.0,
+                        g: theme::COLOR_PRIMARY.1,
+                        b: theme::COLOR_PRIMARY.2,
+                    })
                     .add_attribute(comfy_table::Attribute::Bold)
             } else {
-                comfy_table::Cell::new(format!("  {}", i + 1))
-                    .fg(comfy_table::Color::Rgb { r: theme::COLOR_DIM.0, g: theme::COLOR_DIM.1, b: theme::COLOR_DIM.2 })
+                comfy_table::Cell::new(format!("  {}", i + 1)).fg(comfy_table::Color::Rgb {
+                    r: theme::COLOR_DIM.0,
+                    g: theme::COLOR_DIM.1,
+                    b: theme::COLOR_DIM.2,
+                })
             };
 
             let title_cell = if is_selected {
                 comfy_table::Cell::new(&track.title)
-                    .fg(comfy_table::Color::Rgb { r: theme::COLOR_ACCENT.0, g: theme::COLOR_ACCENT.1, b: theme::COLOR_ACCENT.2 })
+                    .fg(comfy_table::Color::Rgb {
+                        r: theme::COLOR_ACCENT.0,
+                        g: theme::COLOR_ACCENT.1,
+                        b: theme::COLOR_ACCENT.2,
+                    })
                     .add_attribute(comfy_table::Attribute::Bold)
             } else {
-                comfy_table::Cell::new(&track.title)
-                    .fg(comfy_table::Color::Rgb { r: theme::COLOR_DIM.0, g: theme::COLOR_DIM.1, b: theme::COLOR_DIM.2 })
+                comfy_table::Cell::new(&track.title).fg(comfy_table::Color::Rgb {
+                    r: theme::COLOR_DIM.0,
+                    g: theme::COLOR_DIM.1,
+                    b: theme::COLOR_DIM.2,
+                })
             };
 
             let artist_cell = if is_selected {
                 comfy_table::Cell::new(&track.artist)
-                    .fg(comfy_table::Color::Rgb { r: theme::COLOR_PRIMARY.0, g: theme::COLOR_PRIMARY.1, b: theme::COLOR_PRIMARY.2 })
+                    .fg(comfy_table::Color::Rgb {
+                        r: theme::COLOR_PRIMARY.0,
+                        g: theme::COLOR_PRIMARY.1,
+                        b: theme::COLOR_PRIMARY.2,
+                    })
                     .add_attribute(comfy_table::Attribute::Bold)
             } else {
-                comfy_table::Cell::new(&track.artist)
-                    .fg(comfy_table::Color::Rgb { r: theme::COLOR_DIM.0, g: theme::COLOR_DIM.1, b: theme::COLOR_DIM.2 })
+                comfy_table::Cell::new(&track.artist).fg(comfy_table::Color::Rgb {
+                    r: theme::COLOR_DIM.0,
+                    g: theme::COLOR_DIM.1,
+                    b: theme::COLOR_DIM.2,
+                })
             };
 
             let dur_cell = if is_selected {
                 comfy_table::Cell::new(dur_str)
-                    .fg(comfy_table::Color::Rgb { r: theme::COLOR_PRIMARY.0, g: theme::COLOR_PRIMARY.1, b: theme::COLOR_PRIMARY.2 })
+                    .fg(comfy_table::Color::Rgb {
+                        r: theme::COLOR_PRIMARY.0,
+                        g: theme::COLOR_PRIMARY.1,
+                        b: theme::COLOR_PRIMARY.2,
+                    })
                     .add_attribute(comfy_table::Attribute::Bold)
             } else {
-                comfy_table::Cell::new(dur_str)
-                    .fg(comfy_table::Color::Rgb { r: theme::COLOR_DIM.0, g: theme::COLOR_DIM.1, b: theme::COLOR_DIM.2 })
+                comfy_table::Cell::new(dur_str).fg(comfy_table::Color::Rgb {
+                    r: theme::COLOR_DIM.0,
+                    g: theme::COLOR_DIM.1,
+                    b: theme::COLOR_DIM.2,
+                })
             };
 
             table.add_row(vec![num_cell, title_cell, artist_cell, dur_cell]);
@@ -918,18 +1069,24 @@ fn interact_table_select(
         // Add Go Back row
         let is_selected = selected_idx == tracks.len();
         let num_cell = if is_selected {
-            comfy_table::Cell::new("> 🔙")
-                .add_attribute(comfy_table::Attribute::Bold)
+            comfy_table::Cell::new("> 🔙").add_attribute(comfy_table::Attribute::Bold)
         } else {
             comfy_table::Cell::new("  🔙")
         };
         let label_cell = if is_selected {
             comfy_table::Cell::new(go_back_label)
-                .fg(comfy_table::Color::Rgb { r: theme::COLOR_PRIMARY.0, g: theme::COLOR_PRIMARY.1, b: theme::COLOR_PRIMARY.2 })
+                .fg(comfy_table::Color::Rgb {
+                    r: theme::COLOR_PRIMARY.0,
+                    g: theme::COLOR_PRIMARY.1,
+                    b: theme::COLOR_PRIMARY.2,
+                })
                 .add_attribute(comfy_table::Attribute::Bold)
         } else {
-            comfy_table::Cell::new(go_back_label)
-                .fg(comfy_table::Color::Rgb { r: theme::COLOR_DIM.0, g: theme::COLOR_DIM.1, b: theme::COLOR_DIM.2 })
+            comfy_table::Cell::new(go_back_label).fg(comfy_table::Color::Rgb {
+                r: theme::COLOR_DIM.0,
+                g: theme::COLOR_DIM.1,
+                b: theme::COLOR_DIM.2,
+            })
         };
         table.add_row(vec![
             num_cell,
@@ -942,11 +1099,16 @@ fn interact_table_select(
             print!("  {}\r\n", line);
         }
 
-        print!("\r\n  {}\r\n", theme::style_dim("🎮 Controls: [↑/↓] Move  [Enter] Select  [Q/Esc] Back"));
+        print!(
+            "\r\n  {}\r\n",
+            theme::style_dim("🎮 Controls: [↑/↓] Move  [Enter] Select  [Q/Esc] Back")
+        );
         std::io::stdout().flush().ok();
 
         if let Event::Key(key_event) = event::read()? {
-            if key_event.kind == event::KeyEventKind::Press || key_event.kind == event::KeyEventKind::Repeat {
+            if key_event.kind == event::KeyEventKind::Press
+                || key_event.kind == event::KeyEventKind::Repeat
+            {
                 match key_event.code {
                     KeyCode::Up | KeyCode::Char('p') | KeyCode::Char('P') => {
                         selected_idx = (selected_idx + num_options - 1) % num_options;
@@ -987,7 +1149,12 @@ fn interact_album_table_select(
         print!("  ❓ {}\r\n\r\n", theme::style_primary(prompt));
 
         let mut table = theme::create_styled_table();
-        table.set_header(headers.iter().map(|h| theme::style_header_cell(h)).collect::<Vec<_>>());
+        table.set_header(
+            headers
+                .iter()
+                .map(|h| theme::style_header_cell(h))
+                .collect::<Vec<_>>(),
+        );
 
         for (i, album) in albums.iter().enumerate() {
             let is_selected = i == selected_idx;
@@ -998,38 +1165,66 @@ fn interact_album_table_select(
 
             let num_cell = if is_selected {
                 comfy_table::Cell::new(format!("> {}", i + 1))
-                    .fg(comfy_table::Color::Rgb { r: theme::COLOR_PRIMARY.0, g: theme::COLOR_PRIMARY.1, b: theme::COLOR_PRIMARY.2 })
+                    .fg(comfy_table::Color::Rgb {
+                        r: theme::COLOR_PRIMARY.0,
+                        g: theme::COLOR_PRIMARY.1,
+                        b: theme::COLOR_PRIMARY.2,
+                    })
                     .add_attribute(comfy_table::Attribute::Bold)
             } else {
-                comfy_table::Cell::new(format!("  {}", i + 1))
-                    .fg(comfy_table::Color::Rgb { r: theme::COLOR_DIM.0, g: theme::COLOR_DIM.1, b: theme::COLOR_DIM.2 })
+                comfy_table::Cell::new(format!("  {}", i + 1)).fg(comfy_table::Color::Rgb {
+                    r: theme::COLOR_DIM.0,
+                    g: theme::COLOR_DIM.1,
+                    b: theme::COLOR_DIM.2,
+                })
             };
 
             let title_cell = if is_selected {
                 comfy_table::Cell::new(&album.title)
-                    .fg(comfy_table::Color::Rgb { r: theme::COLOR_ACCENT.0, g: theme::COLOR_ACCENT.1, b: theme::COLOR_ACCENT.2 })
+                    .fg(comfy_table::Color::Rgb {
+                        r: theme::COLOR_ACCENT.0,
+                        g: theme::COLOR_ACCENT.1,
+                        b: theme::COLOR_ACCENT.2,
+                    })
                     .add_attribute(comfy_table::Attribute::Bold)
             } else {
-                comfy_table::Cell::new(&album.title)
-                    .fg(comfy_table::Color::Rgb { r: theme::COLOR_DIM.0, g: theme::COLOR_DIM.1, b: theme::COLOR_DIM.2 })
+                comfy_table::Cell::new(&album.title).fg(comfy_table::Color::Rgb {
+                    r: theme::COLOR_DIM.0,
+                    g: theme::COLOR_DIM.1,
+                    b: theme::COLOR_DIM.2,
+                })
             };
 
             let artist_cell = if is_selected {
                 comfy_table::Cell::new(&album.artist)
-                    .fg(comfy_table::Color::Rgb { r: theme::COLOR_PRIMARY.0, g: theme::COLOR_PRIMARY.1, b: theme::COLOR_PRIMARY.2 })
+                    .fg(comfy_table::Color::Rgb {
+                        r: theme::COLOR_PRIMARY.0,
+                        g: theme::COLOR_PRIMARY.1,
+                        b: theme::COLOR_PRIMARY.2,
+                    })
                     .add_attribute(comfy_table::Attribute::Bold)
             } else {
-                comfy_table::Cell::new(&album.artist)
-                    .fg(comfy_table::Color::Rgb { r: theme::COLOR_DIM.0, g: theme::COLOR_DIM.1, b: theme::COLOR_DIM.2 })
+                comfy_table::Cell::new(&album.artist).fg(comfy_table::Color::Rgb {
+                    r: theme::COLOR_DIM.0,
+                    g: theme::COLOR_DIM.1,
+                    b: theme::COLOR_DIM.2,
+                })
             };
 
             let year_cell = if is_selected {
                 comfy_table::Cell::new(year_str)
-                    .fg(comfy_table::Color::Rgb { r: theme::COLOR_PRIMARY.0, g: theme::COLOR_PRIMARY.1, b: theme::COLOR_PRIMARY.2 })
+                    .fg(comfy_table::Color::Rgb {
+                        r: theme::COLOR_PRIMARY.0,
+                        g: theme::COLOR_PRIMARY.1,
+                        b: theme::COLOR_PRIMARY.2,
+                    })
                     .add_attribute(comfy_table::Attribute::Bold)
             } else {
-                comfy_table::Cell::new(year_str)
-                    .fg(comfy_table::Color::Rgb { r: theme::COLOR_DIM.0, g: theme::COLOR_DIM.1, b: theme::COLOR_DIM.2 })
+                comfy_table::Cell::new(year_str).fg(comfy_table::Color::Rgb {
+                    r: theme::COLOR_DIM.0,
+                    g: theme::COLOR_DIM.1,
+                    b: theme::COLOR_DIM.2,
+                })
             };
 
             table.add_row(vec![num_cell, title_cell, artist_cell, year_cell]);
@@ -1038,18 +1233,24 @@ fn interact_album_table_select(
         // Add Go Back row
         let is_selected = selected_idx == albums.len();
         let num_cell = if is_selected {
-            comfy_table::Cell::new("> 🔙")
-                .add_attribute(comfy_table::Attribute::Bold)
+            comfy_table::Cell::new("> 🔙").add_attribute(comfy_table::Attribute::Bold)
         } else {
             comfy_table::Cell::new("  🔙")
         };
         let label_cell = if is_selected {
             comfy_table::Cell::new(go_back_label)
-                .fg(comfy_table::Color::Rgb { r: theme::COLOR_PRIMARY.0, g: theme::COLOR_PRIMARY.1, b: theme::COLOR_PRIMARY.2 })
+                .fg(comfy_table::Color::Rgb {
+                    r: theme::COLOR_PRIMARY.0,
+                    g: theme::COLOR_PRIMARY.1,
+                    b: theme::COLOR_PRIMARY.2,
+                })
                 .add_attribute(comfy_table::Attribute::Bold)
         } else {
-            comfy_table::Cell::new(go_back_label)
-                .fg(comfy_table::Color::Rgb { r: theme::COLOR_DIM.0, g: theme::COLOR_DIM.1, b: theme::COLOR_DIM.2 })
+            comfy_table::Cell::new(go_back_label).fg(comfy_table::Color::Rgb {
+                r: theme::COLOR_DIM.0,
+                g: theme::COLOR_DIM.1,
+                b: theme::COLOR_DIM.2,
+            })
         };
         table.add_row(vec![
             num_cell,
@@ -1062,11 +1263,16 @@ fn interact_album_table_select(
             print!("  {}\r\n", line);
         }
 
-        print!("\r\n  {}\r\n", theme::style_dim("🎮 Controls: [↑/↓] Move  [Enter] Select  [Q/Esc] Back"));
+        print!(
+            "\r\n  {}\r\n",
+            theme::style_dim("🎮 Controls: [↑/↓] Move  [Enter] Select  [Q/Esc] Back")
+        );
         std::io::stdout().flush().ok();
 
         if let Event::Key(key_event) = event::read()? {
-            if key_event.kind == event::KeyEventKind::Press || key_event.kind == event::KeyEventKind::Repeat {
+            if key_event.kind == event::KeyEventKind::Press
+                || key_event.kind == event::KeyEventKind::Repeat
+            {
                 match key_event.code {
                     KeyCode::Up | KeyCode::Char('p') | KeyCode::Char('P') => {
                         selected_idx = (selected_idx + num_options - 1) % num_options;
@@ -1107,7 +1313,12 @@ fn interact_history_select(
         print!("  ❓ {}\r\n\r\n", theme::style_primary(prompt));
 
         let mut table = theme::create_styled_table();
-        table.set_header(headers.iter().map(|h| theme::style_header_cell(h)).collect::<Vec<_>>());
+        table.set_header(
+            headers
+                .iter()
+                .map(|h| theme::style_header_cell(h))
+                .collect::<Vec<_>>(),
+        );
 
         for (i, entry) in history.iter().enumerate() {
             let is_selected = i == selected_idx;
@@ -1119,38 +1330,66 @@ fn interact_history_select(
 
             let num_cell = if is_selected {
                 comfy_table::Cell::new(format!("> {}", i + 1))
-                    .fg(comfy_table::Color::Rgb { r: theme::COLOR_PRIMARY.0, g: theme::COLOR_PRIMARY.1, b: theme::COLOR_PRIMARY.2 })
+                    .fg(comfy_table::Color::Rgb {
+                        r: theme::COLOR_PRIMARY.0,
+                        g: theme::COLOR_PRIMARY.1,
+                        b: theme::COLOR_PRIMARY.2,
+                    })
                     .add_attribute(comfy_table::Attribute::Bold)
             } else {
-                comfy_table::Cell::new(format!("  {}", i + 1))
-                    .fg(comfy_table::Color::Rgb { r: theme::COLOR_DIM.0, g: theme::COLOR_DIM.1, b: theme::COLOR_DIM.2 })
+                comfy_table::Cell::new(format!("  {}", i + 1)).fg(comfy_table::Color::Rgb {
+                    r: theme::COLOR_DIM.0,
+                    g: theme::COLOR_DIM.1,
+                    b: theme::COLOR_DIM.2,
+                })
             };
 
             let title_cell = if is_selected {
                 comfy_table::Cell::new(&entry.title)
-                    .fg(comfy_table::Color::Rgb { r: theme::COLOR_ACCENT.0, g: theme::COLOR_ACCENT.1, b: theme::COLOR_ACCENT.2 })
+                    .fg(comfy_table::Color::Rgb {
+                        r: theme::COLOR_ACCENT.0,
+                        g: theme::COLOR_ACCENT.1,
+                        b: theme::COLOR_ACCENT.2,
+                    })
                     .add_attribute(comfy_table::Attribute::Bold)
             } else {
-                comfy_table::Cell::new(&entry.title)
-                    .fg(comfy_table::Color::Rgb { r: theme::COLOR_DIM.0, g: theme::COLOR_DIM.1, b: theme::COLOR_DIM.2 })
+                comfy_table::Cell::new(&entry.title).fg(comfy_table::Color::Rgb {
+                    r: theme::COLOR_DIM.0,
+                    g: theme::COLOR_DIM.1,
+                    b: theme::COLOR_DIM.2,
+                })
             };
 
             let artist_cell = if is_selected {
                 comfy_table::Cell::new(&entry.artist)
-                    .fg(comfy_table::Color::Rgb { r: theme::COLOR_PRIMARY.0, g: theme::COLOR_PRIMARY.1, b: theme::COLOR_PRIMARY.2 })
+                    .fg(comfy_table::Color::Rgb {
+                        r: theme::COLOR_PRIMARY.0,
+                        g: theme::COLOR_PRIMARY.1,
+                        b: theme::COLOR_PRIMARY.2,
+                    })
                     .add_attribute(comfy_table::Attribute::Bold)
             } else {
-                comfy_table::Cell::new(&entry.artist)
-                    .fg(comfy_table::Color::Rgb { r: theme::COLOR_DIM.0, g: theme::COLOR_DIM.1, b: theme::COLOR_DIM.2 })
+                comfy_table::Cell::new(&entry.artist).fg(comfy_table::Color::Rgb {
+                    r: theme::COLOR_DIM.0,
+                    g: theme::COLOR_DIM.1,
+                    b: theme::COLOR_DIM.2,
+                })
             };
 
             let date_cell = if is_selected {
                 comfy_table::Cell::new(short_date)
-                    .fg(comfy_table::Color::Rgb { r: theme::COLOR_PRIMARY.0, g: theme::COLOR_PRIMARY.1, b: theme::COLOR_PRIMARY.2 })
+                    .fg(comfy_table::Color::Rgb {
+                        r: theme::COLOR_PRIMARY.0,
+                        g: theme::COLOR_PRIMARY.1,
+                        b: theme::COLOR_PRIMARY.2,
+                    })
                     .add_attribute(comfy_table::Attribute::Bold)
             } else {
-                comfy_table::Cell::new(short_date)
-                    .fg(comfy_table::Color::Rgb { r: theme::COLOR_DIM.0, g: theme::COLOR_DIM.1, b: theme::COLOR_DIM.2 })
+                comfy_table::Cell::new(short_date).fg(comfy_table::Color::Rgb {
+                    r: theme::COLOR_DIM.0,
+                    g: theme::COLOR_DIM.1,
+                    b: theme::COLOR_DIM.2,
+                })
             };
 
             table.add_row(vec![num_cell, title_cell, artist_cell, date_cell]);
@@ -1159,18 +1398,24 @@ fn interact_history_select(
         // Add Go Back row
         let is_selected = selected_idx == history.len();
         let num_cell = if is_selected {
-            comfy_table::Cell::new("> 🔙")
-                .add_attribute(comfy_table::Attribute::Bold)
+            comfy_table::Cell::new("> 🔙").add_attribute(comfy_table::Attribute::Bold)
         } else {
             comfy_table::Cell::new("  🔙")
         };
         let label_cell = if is_selected {
             comfy_table::Cell::new(go_back_label)
-                .fg(comfy_table::Color::Rgb { r: theme::COLOR_PRIMARY.0, g: theme::COLOR_PRIMARY.1, b: theme::COLOR_PRIMARY.2 })
+                .fg(comfy_table::Color::Rgb {
+                    r: theme::COLOR_PRIMARY.0,
+                    g: theme::COLOR_PRIMARY.1,
+                    b: theme::COLOR_PRIMARY.2,
+                })
                 .add_attribute(comfy_table::Attribute::Bold)
         } else {
-            comfy_table::Cell::new(go_back_label)
-                .fg(comfy_table::Color::Rgb { r: theme::COLOR_DIM.0, g: theme::COLOR_DIM.1, b: theme::COLOR_DIM.2 })
+            comfy_table::Cell::new(go_back_label).fg(comfy_table::Color::Rgb {
+                r: theme::COLOR_DIM.0,
+                g: theme::COLOR_DIM.1,
+                b: theme::COLOR_DIM.2,
+            })
         };
         table.add_row(vec![
             num_cell,
@@ -1183,11 +1428,16 @@ fn interact_history_select(
             print!("  {}\r\n", line);
         }
 
-        print!("\r\n  {}\r\n", theme::style_dim("🎮 Controls: [↑/↓] Move  [Enter] Select  [Q/Esc] Back"));
+        print!(
+            "\r\n  {}\r\n",
+            theme::style_dim("🎮 Controls: [↑/↓] Move  [Enter] Select  [Q/Esc] Back")
+        );
         std::io::stdout().flush().ok();
 
         if let Event::Key(key_event) = event::read()? {
-            if key_event.kind == event::KeyEventKind::Press || key_event.kind == event::KeyEventKind::Repeat {
+            if key_event.kind == event::KeyEventKind::Press
+                || key_event.kind == event::KeyEventKind::Repeat
+            {
                 match key_event.code {
                     KeyCode::Up | KeyCode::Char('p') | KeyCode::Char('P') => {
                         selected_idx = (selected_idx + num_options - 1) % num_options;
@@ -1212,7 +1462,13 @@ fn interact_history_select(
     }
 }
 
-async fn run_search_and_play(config: &Config, db: &Db, client: &NetworkClient, current_volume: &mut f32, debug: bool) -> Result<()> {
+async fn run_search_and_play(
+    config: &Config,
+    db: &Db,
+    client: &NetworkClient,
+    current_volume: &mut f32,
+    debug: bool,
+) -> Result<()> {
     loop {
         clear_screen();
         let query: String = dialoguer::Input::with_theme(&theme::get_dialoguer_theme())
@@ -1221,8 +1477,12 @@ async fn run_search_and_play(config: &Config, db: &Db, client: &NetworkClient, c
             .interact_text()?;
 
         let query = query.trim();
-        if query.is_empty() { continue; }
-        if query.eq_ignore_ascii_case("q") { break; }
+        if query.is_empty() {
+            continue;
+        }
+        if query.eq_ignore_ascii_case("q") {
+            break;
+        }
 
         println!("\n  🔍 Searching for '{}'...", theme::style_primary(query));
         let tracks = client.search(query).await?;
@@ -1247,8 +1507,11 @@ async fn run_search_and_play(config: &Config, db: &Db, client: &NetworkClient, c
             let selected_track = tracks[selection].clone();
             let mut queue = vec![selected_track.clone()];
             let mut autoplay_ctoken = None;
-            
-            let discord_active = config.get_discord_settings().map(|d| d.enabled).unwrap_or(false);
+
+            let discord_active = config
+                .get_discord_settings()
+                .map(|d| d.enabled)
+                .unwrap_or(false);
             if !discord_active {
                 println!("\n  📻 Fetching autoplay recommendations...");
                 match client.fetch_autoplay_queue(&selected_track.id).await {
@@ -1262,13 +1525,29 @@ async fn run_search_and_play(config: &Config, db: &Db, client: &NetworkClient, c
                 }
             }
 
-            let _ = play_queue(queue, 0, config, db, client, autoplay_ctoken, current_volume, debug).await?;
+            play_queue(
+                queue,
+                0,
+                config,
+                db,
+                client,
+                autoplay_ctoken,
+                current_volume,
+                debug,
+            )
+            .await?;
         }
     }
     Ok(())
 }
 
-async fn run_search_albums_and_play(config: &Config, db: &Db, client: &NetworkClient, current_volume: &mut f32, debug: bool) -> Result<()> {
+async fn run_search_albums_and_play(
+    config: &Config,
+    db: &Db,
+    client: &NetworkClient,
+    current_volume: &mut f32,
+    debug: bool,
+) -> Result<()> {
     loop {
         clear_screen();
         let query: String = dialoguer::Input::with_theme(&theme::get_dialoguer_theme())
@@ -1277,10 +1556,17 @@ async fn run_search_albums_and_play(config: &Config, db: &Db, client: &NetworkCl
             .interact_text()?;
 
         let query = query.trim();
-        if query.is_empty() { continue; }
-        if query.eq_ignore_ascii_case("q") { break; }
+        if query.is_empty() {
+            continue;
+        }
+        if query.eq_ignore_ascii_case("q") {
+            break;
+        }
 
-        println!("\n  🔍 Searching for albums matching '{}'...", theme::style_primary(query));
+        println!(
+            "\n  🔍 Searching for albums matching '{}'...",
+            theme::style_primary(query)
+        );
         let albums = client.search_albums(query).await?;
 
         if albums.is_empty() {
@@ -1301,29 +1587,43 @@ async fn run_search_albums_and_play(config: &Config, db: &Db, client: &NetworkCl
             };
 
             let selected_album = &albums[selection];
-            println!("\n  💿 Loading tracks for album '{}'...", theme::style_primary(&selected_album.title));
+            println!(
+                "\n  💿 Loading tracks for album '{}'...",
+                theme::style_primary(&selected_album.title)
+            );
 
             let yt_dlp_path = config.ensure_yt_dlp().await?;
             let browser = config.get_browser();
-            let album_url = format!("https://music.youtube.com/playlist?list={}", selected_album.id);
+            let album_url = format!(
+                "https://music.youtube.com/playlist?list={}",
+                selected_album.id
+            );
 
-            match client.fetch_playlist(
-                &yt_dlp_path,
-                browser.as_deref(),
-                &config.cookies_path,
-                &config.get_js_runtime_arg(),
-                &album_url,
-            ).await {
+            match client
+                .fetch_playlist(
+                    &yt_dlp_path,
+                    browser.as_deref(),
+                    &config.cookies_path,
+                    &config.get_js_runtime_arg(),
+                    &album_url,
+                )
+                .await
+            {
                 Ok(tracks) => {
                     if tracks.is_empty() {
                         println!("  ❌ {}", theme::style_error("This album has no tracks."));
                         press_enter_to_continue();
                     } else {
-                        let _ = play_queue(tracks, 0, config, db, client, None, current_volume, debug).await?;
+                        play_queue(tracks, 0, config, db, client, None, current_volume, debug)
+                            .await?;
                     }
                 }
                 Err(e) => {
-                    println!("  ❌ {} {}", theme::style_error("Failed to load album tracks:"), e);
+                    println!(
+                        "  ❌ {} {}",
+                        theme::style_error("Failed to load album tracks:"),
+                        e
+                    );
                     press_enter_to_continue();
                 }
             }
@@ -1332,7 +1632,13 @@ async fn run_search_albums_and_play(config: &Config, db: &Db, client: &NetworkCl
     Ok(())
 }
 
-async fn run_history(config: &Config, db: &Db, client: &NetworkClient, current_volume: &mut f32, debug: bool) -> Result<()> {
+async fn run_history(
+    config: &Config,
+    db: &Db,
+    client: &NetworkClient,
+    current_volume: &mut f32,
+    debug: bool,
+) -> Result<()> {
     loop {
         clear_screen();
         let history = db.get_history(20)?;
@@ -1362,8 +1668,11 @@ async fn run_history(config: &Config, db: &Db, client: &NetworkClient, current_v
         };
         let mut queue = vec![track.clone()];
         let mut autoplay_ctoken = None;
-        
-        let discord_active = config.get_discord_settings().map(|d| d.enabled).unwrap_or(false);
+
+        let discord_active = config
+            .get_discord_settings()
+            .map(|d| d.enabled)
+            .unwrap_or(false);
         if !discord_active {
             println!("\n  📻 Fetching autoplay recommendations...");
             match client.fetch_autoplay_queue(&track.id).await {
@@ -1376,7 +1685,17 @@ async fn run_history(config: &Config, db: &Db, client: &NetworkClient, current_v
                 }
             }
         }
-        play_queue(queue, 0, config, db, client, autoplay_ctoken, current_volume, debug).await?;
+        play_queue(
+            queue,
+            0,
+            config,
+            db,
+            client,
+            autoplay_ctoken,
+            current_volume,
+            debug,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -1384,12 +1703,8 @@ async fn run_history(config: &Config, db: &Db, client: &NetworkClient, current_v
 async fn run_cache_menu(_config: &Config, db: &Db) -> Result<()> {
     loop {
         clear_screen();
-        let selections = &[
-            "💾 List cached tracks",
-            "🗑️ Clear cache",
-            "🔙 Go back"
-        ];
-        
+        let selections = &["💾 List cached tracks", "🗑️ Clear cache", "🔙 Go back"];
+
         let selection = dialoguer::Select::with_theme(&theme::get_dialoguer_theme())
             .with_prompt("Cache Management")
             .default(0)
@@ -1411,7 +1726,8 @@ async fn run_cache_menu(_config: &Config, db: &Db) -> Result<()> {
                         theme::style_header_cell("Cached At"),
                     ]);
                     for (i, track) in tracks.iter().enumerate() {
-                        let dur_str = format_duration(Duration::from_secs(track.duration_secs as u64));
+                        let dur_str =
+                            format_duration(Duration::from_secs(track.duration_secs as u64));
                         let short_date = if track.cached_at.len() > 19 {
                             &track.cached_at[..19]
                         } else {
@@ -1432,7 +1748,7 @@ async fn run_cache_menu(_config: &Config, db: &Db) -> Result<()> {
             1 => {
                 let tracks = db.list_cached_tracks()?;
                 let count = tracks.len();
-                
+
                 if count == 0 {
                     println!("  No cached tracks to clear.");
                     press_enter_to_continue();
@@ -1440,10 +1756,13 @@ async fn run_cache_menu(_config: &Config, db: &Db) -> Result<()> {
                 }
 
                 let confirm = dialoguer::Confirm::with_theme(&theme::get_dialoguer_theme())
-                    .with_prompt(format!("Are you sure you want to delete {} cached track(s)?", count))
+                    .with_prompt(format!(
+                        "Are you sure you want to delete {} cached track(s)?",
+                        count
+                    ))
                     .default(false)
                     .interact()?;
-                
+
                 if confirm {
                     for track in tracks {
                         let path = PathBuf::from(&track.file_path);
@@ -1452,7 +1771,10 @@ async fn run_cache_menu(_config: &Config, db: &Db) -> Result<()> {
                         }
                     }
                     db.clear_cache()?;
-                    println!("  ✨ {}", theme::style_primary(&format!("Cleared {} cached track(s).", count)));
+                    println!(
+                        "  ✨ {}",
+                        theme::style_primary(&format!("Cleared {} cached track(s).", count))
+                    );
                 } else {
                     println!("  Cancelled.");
                 }
@@ -1488,7 +1810,10 @@ async fn run_login_flow(config: &Config) -> Result<()> {
     }
 
     let browser = browsers[selection];
-    println!("  Extracting cookies from {}...", theme::style_primary(browser));
+    println!(
+        "  Extracting cookies from {}...",
+        theme::style_primary(browser)
+    );
     if let Err(e) = config.login(browser).await {
         println!("  ❌ {}", theme::style_error(&e.to_string()));
     } else {
@@ -1521,7 +1846,16 @@ async fn run_playlist_playback(
 
     println!("\n  Fetching playlist tracks...");
     let browser = config.get_browser();
-    let tracks = match client.fetch_playlist(&yt_dlp_path, browser.as_deref(), &config.cookies_path, &config.get_js_runtime_arg(), &url).await {
+    let tracks = match client
+        .fetch_playlist(
+            &yt_dlp_path,
+            browser.as_deref(),
+            &config.cookies_path,
+            &config.get_js_runtime_arg(),
+            &url,
+        )
+        .await
+    {
         Ok(t) => t,
         Err(e) => {
             println!("  ❌ Failed to fetch playlist tracks: {}", e);
@@ -1538,13 +1872,13 @@ async fn run_playlist_playback(
 
     loop {
         clear_screen();
-        println!("\n  ── Playlist: {} ──", theme::style_primary(playlist_title));
+        println!(
+            "\n  ── Playlist: {} ──",
+            theme::style_primary(playlist_title)
+        );
         print_track_table(&tracks);
 
-        let mut options = vec![
-            "▶️ Play All".to_string(),
-            "🔀 Shuffle Play".to_string(),
-        ];
+        let mut options = vec!["▶️ Play All".to_string(), "🔀 Shuffle Play".to_string()];
         for (i, t) in tracks.iter().enumerate() {
             let dur = match t.duration_secs {
                 Some(d) => format_duration(Duration::from_secs(d as u64)),
@@ -1561,29 +1895,73 @@ async fn run_playlist_playback(
             .interact()?;
 
         if selection == 0 {
-            play_queue(tracks.clone(), 0, config, db, client, None, current_volume, debug).await?;
+            play_queue(
+                tracks.clone(),
+                0,
+                config,
+                db,
+                client,
+                None,
+                current_volume,
+                debug,
+            )
+            .await?;
         } else if selection == 1 {
             let mut shuffled_tracks = tracks.clone();
             shuffle_tracks(&mut shuffled_tracks);
-            play_queue(shuffled_tracks, 0, config, db, client, None, current_volume, debug).await?;
+            play_queue(
+                shuffled_tracks,
+                0,
+                config,
+                db,
+                client,
+                None,
+                current_volume,
+                debug,
+            )
+            .await?;
         } else if selection == options.len() - 1 {
             break;
         } else {
             let track_idx = selection - 2;
-            play_queue(tracks.clone(), track_idx, config, db, client, None, current_volume, debug).await?;
+            play_queue(
+                tracks.clone(),
+                track_idx,
+                config,
+                db,
+                client,
+                None,
+                current_volume,
+                debug,
+            )
+            .await?;
         }
     }
     Ok(())
 }
 
-async fn run_library_playlists(config: &Config, db: &Db, client: &NetworkClient, current_volume: &mut f32, debug: bool) -> Result<()> {
+async fn run_library_playlists(
+    config: &Config,
+    db: &Db,
+    client: &NetworkClient,
+    current_volume: &mut f32,
+    debug: bool,
+) -> Result<()> {
     loop {
         clear_screen();
         let yt_dlp_path = config.ensure_yt_dlp().await?;
 
         println!("\n  Fetching your playlists...");
         let browser = config.get_browser();
-        let playlists = match client.fetch_library_playlists(&yt_dlp_path, browser.as_deref(), &config.cookies_path, &config.get_js_runtime_arg()).await {
+        let playlists = match client
+            .fetch_library_playlists(
+                &yt_dlp_path,
+                browser.as_deref(),
+                &config.cookies_path,
+                &config.get_js_runtime_arg(),
+            )
+            .await
+        {
             Ok(p) => p,
             Err(e) => {
                 println!("  ❌ Failed to fetch library playlists: {}", e);
@@ -1598,13 +1976,16 @@ async fn run_library_playlists(config: &Config, db: &Db, client: &NetworkClient,
             return Ok(());
         }
 
-        let mut options: Vec<String> = playlists.iter().map(|p| {
-            let count_str = match p.track_count {
-                Some(c) => format!(" ({} tracks)", c),
-                None => "".to_string(),
-            };
-            format!("📁 {}{}", p.title, count_str)
-        }).collect();
+        let mut options: Vec<String> = playlists
+            .iter()
+            .map(|p| {
+                let count_str = match p.track_count {
+                    Some(c) => format!(" ({} tracks)", c),
+                    None => "".to_string(),
+                };
+                format!("📁 {}{}", p.title, count_str)
+            })
+            .collect();
         options.push("🔙 Go back".to_string());
 
         let selection = dialoguer::Select::with_theme(&theme::get_dialoguer_theme())
@@ -1618,7 +1999,16 @@ async fn run_library_playlists(config: &Config, db: &Db, client: &NetworkClient,
         }
 
         let playlist = &playlists[selection];
-        run_playlist_playback(&playlist.id, &playlist.title, config, db, client, current_volume, debug).await?;
+        run_playlist_playback(
+            &playlist.id,
+            &playlist.title,
+            config,
+            db,
+            client,
+            current_volume,
+            debug,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -1663,20 +2053,24 @@ async fn run_discord_menu(config: &Config) -> Result<()> {
 
                 if !s.enabled && (s.token.is_empty() || s.channel_id.is_empty()) {
                     println!("\n  ⚠️  Discord Selfbot credentials are required before enabling.");
-                    
+
                     let token: String = dialoguer::Input::with_theme(&theme::get_dialoguer_theme())
                         .with_prompt("Enter Discord User Token (Selfbot)")
                         .interact_text()?;
-                    
-                    let channel_id: String = dialoguer::Input::with_theme(&theme::get_dialoguer_theme())
-                        .with_prompt("Enter Target Discord Text Channel ID")
-                        .interact_text()?;
+
+                    let channel_id: String =
+                        dialoguer::Input::with_theme(&theme::get_dialoguer_theme())
+                            .with_prompt("Enter Target Discord Text Channel ID")
+                            .interact_text()?;
 
                     let token = token.trim();
                     let channel_id = channel_id.trim();
 
                     if token.is_empty() || channel_id.is_empty() {
-                        println!("  ❌ {}", theme::style_error("Token and Channel ID cannot be empty."));
+                        println!(
+                            "  ❌ {}",
+                            theme::style_error("Token and Channel ID cannot be empty.")
+                        );
                         press_enter_to_continue();
                         continue;
                     }
@@ -1687,7 +2081,7 @@ async fn run_discord_menu(config: &Config) -> Result<()> {
 
                 s.enabled = !s.enabled;
                 config.save_discord_settings(&s)?;
-                
+
                 if s.enabled {
                     println!("\n  ✅ Discord Selfbot Mode enabled! (Warning: Selfbots violate Discord TOS. Use at your own risk.)");
                 } else {
@@ -1706,17 +2100,21 @@ async fn run_discord_menu(config: &Config) -> Result<()> {
                     .with_prompt("Enter Discord User Token")
                     .default(s.token)
                     .interact_text()?;
-                
-                let channel_id: String = dialoguer::Input::with_theme(&theme::get_dialoguer_theme())
-                    .with_prompt("Enter Discord Text Channel ID")
-                    .default(s.channel_id)
-                    .interact_text()?;
+
+                let channel_id: String =
+                    dialoguer::Input::with_theme(&theme::get_dialoguer_theme())
+                        .with_prompt("Enter Discord Text Channel ID")
+                        .default(s.channel_id)
+                        .interact_text()?;
 
                 let token = token.trim();
                 let channel_id = channel_id.trim();
 
                 if token.is_empty() || channel_id.is_empty() {
-                    println!("  ❌ {}", theme::style_error("Token and Channel ID cannot be empty."));
+                    println!(
+                        "  ❌ {}",
+                        theme::style_error("Token and Channel ID cannot be empty.")
+                    );
                     press_enter_to_continue();
                     continue;
                 }
@@ -1734,12 +2132,18 @@ async fn run_discord_menu(config: &Config) -> Result<()> {
     Ok(())
 }
 
-async fn run_interactive_menu(config: &Config, db: &Db, client: &NetworkClient, current_volume: &mut f32, debug: bool) -> Result<()> {
+async fn run_interactive_menu(
+    config: &Config,
+    db: &Db,
+    client: &NetworkClient,
+    current_volume: &mut f32,
+    debug: bool,
+) -> Result<()> {
     loop {
         clear_screen();
         theme::print_banner();
         let logged_in = config.is_logged_in();
-        
+
         let mut selections = vec![
             "🔍 Search and Play (Tracks)".to_string(),
             "💿 Search Albums".to_string(),
@@ -1810,7 +2214,8 @@ async fn main() -> Result<()> {
             simplelog::LevelFilter::Debug,
             simplelog::Config::default(),
             file,
-        ).ok();
+        )
+        .ok();
     }
 
     let db = Db::new(&config.db_path)?;
@@ -1834,8 +2239,11 @@ async fn main() -> Result<()> {
             let selected_track = tracks[0].clone();
             let mut queue = vec![selected_track.clone()];
             let mut autoplay_ctoken = None;
-            
-            let discord_active = config.get_discord_settings().map(|d| d.enabled).unwrap_or(false);
+
+            let discord_active = config
+                .get_discord_settings()
+                .map(|d| d.enabled)
+                .unwrap_or(false);
             if !discord_active {
                 println!("  📻 Fetching autoplay recommendations... ");
                 match client.fetch_autoplay_queue(&selected_track.id).await {
@@ -1848,7 +2256,17 @@ async fn main() -> Result<()> {
                     }
                 }
             }
-            play_queue(queue, 0, &config, &db, &client, autoplay_ctoken, &mut current_volume, debug).await?;
+            play_queue(
+                queue,
+                0,
+                &config,
+                &db,
+                &client,
+                autoplay_ctoken,
+                &mut current_volume,
+                debug,
+            )
+            .await?;
         }
         Some(Commands::Album { query }) => {
             println!("Searching for album '{}'...", query);
@@ -1861,19 +2279,34 @@ async fn main() -> Result<()> {
             println!("Loading tracks for album '{}'...", selected_album.title);
             let yt_dlp_path = config.ensure_yt_dlp().await?;
             let browser = config.get_browser();
-            let album_url = format!("https://music.youtube.com/playlist?list={}", selected_album.id);
-            let tracks = client.fetch_playlist(
-                &yt_dlp_path,
-                browser.as_deref(),
-                &config.cookies_path,
-                &config.get_js_runtime_arg(),
-                &album_url,
-            ).await?;
+            let album_url = format!(
+                "https://music.youtube.com/playlist?list={}",
+                selected_album.id
+            );
+            let tracks = client
+                .fetch_playlist(
+                    &yt_dlp_path,
+                    browser.as_deref(),
+                    &config.cookies_path,
+                    &config.get_js_runtime_arg(),
+                    &album_url,
+                )
+                .await?;
             if tracks.is_empty() {
                 println!("This album has no tracks.");
                 return Ok(());
             }
-            play_queue(tracks, 0, &config, &db, &client, None, &mut current_volume, debug).await?;
+            play_queue(
+                tracks,
+                0,
+                &config,
+                &db,
+                &client,
+                None,
+                &mut current_volume,
+                debug,
+            )
+            .await?;
         }
         Some(Commands::Search { query }) => {
             println!("Searching for '{}'...", query);
@@ -1893,53 +2326,61 @@ async fn main() -> Result<()> {
             }
             print_album_table(&albums);
         }
-        Some(Commands::Cache { action }) => {
-            match action {
-                CacheCommands::List => {
-                    let tracks = db.list_cached_tracks()?;
-                    if tracks.is_empty() {
-                        println!("No cached tracks found.");
-                        return Ok(());
-                    }
-                    println!("{:<12} | {:<30} | {:<20} | {:<8} | {}", "ID", "Title", "Artist", "Duration", "Cached At");
-                    println!("{}", "-".repeat(90));
-                    for track in tracks {
-                        let dur_str = format_duration(Duration::from_secs(track.duration_secs as u64));
-                        println!("{:<12} | {:<30} | {:<20} | {:<8} | {}", 
-                                 track.video_id, 
-                                 truncate(&track.title, 30), 
-                                 truncate(&track.artist, 20), 
-                                 dur_str, 
-                                 track.cached_at);
-                    }
+        Some(Commands::Cache { action }) => match action {
+            CacheCommands::List => {
+                let tracks = db.list_cached_tracks()?;
+                if tracks.is_empty() {
+                    println!("No cached tracks found.");
+                    return Ok(());
                 }
-                CacheCommands::Clear => {
-                    let tracks = db.list_cached_tracks()?;
-                    for track in tracks {
-                        let path = PathBuf::from(&track.file_path);
-                        if path.exists() {
-                            std::fs::remove_file(path).ok();
-                        }
-                    }
-                    db.clear_cache()?;
-                    println!("Cache cleared successfully.");
+                println!(
+                    "{:<12} | {:<30} | {:<20} | {:<8} | {}",
+                    "ID", "Title", "Artist", "Duration", "Cached At"
+                );
+                println!("{}", "-".repeat(90));
+                for track in tracks {
+                    let dur_str = format_duration(Duration::from_secs(track.duration_secs as u64));
+                    println!(
+                        "{:<12} | {:<30} | {:<20} | {:<8} | {}",
+                        track.video_id,
+                        truncate(&track.title, 30),
+                        truncate(&track.artist, 20),
+                        dur_str,
+                        track.cached_at
+                    );
                 }
             }
-        }
+            CacheCommands::Clear => {
+                let tracks = db.list_cached_tracks()?;
+                for track in tracks {
+                    let path = PathBuf::from(&track.file_path);
+                    if path.exists() {
+                        std::fs::remove_file(path).ok();
+                    }
+                }
+                db.clear_cache()?;
+                println!("Cache cleared successfully.");
+            }
+        },
         Some(Commands::History { limit }) => {
             let history = db.get_history(limit)?;
             if history.is_empty() {
                 println!("No playback history found.");
                 return Ok(());
             }
-            println!("{:<25} | {:<30} | {:<20} | {}", "Played At", "Title", "Artist", "Video ID");
+            println!(
+                "{:<25} | {:<30} | {:<20} | {}",
+                "Played At", "Title", "Artist", "Video ID"
+            );
             println!("{}", "-".repeat(90));
             for entry in history {
-                println!("{:<25} | {:<30} | {:<20} | {}", 
-                         entry.played_at, 
-                         truncate(&entry.title, 30), 
-                         truncate(&entry.artist, 20), 
-                         entry.video_id);
+                println!(
+                    "{:<25} | {:<30} | {:<20} | {}",
+                    entry.played_at,
+                    truncate(&entry.title, 30),
+                    truncate(&entry.artist, 20),
+                    entry.video_id
+                );
             }
         }
         Some(Commands::Login { browser }) => {
@@ -1953,7 +2394,15 @@ async fn main() -> Result<()> {
             let yt_dlp_path = config.ensure_yt_dlp().await?;
             println!("Fetching playlist details...");
             let browser = config.get_browser();
-            let mut tracks = client.fetch_playlist(&yt_dlp_path, browser.as_deref(), &config.cookies_path, &config.get_js_runtime_arg(), &url).await?;
+            let mut tracks = client
+                .fetch_playlist(
+                    &yt_dlp_path,
+                    browser.as_deref(),
+                    &config.cookies_path,
+                    &config.get_js_runtime_arg(),
+                    &url,
+                )
+                .await?;
             if tracks.is_empty() {
                 println!("No tracks found in playlist.");
                 return Ok(());
@@ -1961,9 +2410,19 @@ async fn main() -> Result<()> {
             if shuffle {
                 shuffle_tracks(&mut tracks);
             }
-            play_queue(tracks, 0, &config, &db, &client, None, &mut current_volume, debug).await?;
+            play_queue(
+                tracks,
+                0,
+                &config,
+                &db,
+                &client,
+                None,
+                &mut current_volume,
+                debug,
+            )
+            .await?;
         }
     }
-    
+
     Ok(())
 }

@@ -1,5 +1,5 @@
-use std::path::PathBuf;
 use directories::ProjectDirs;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DiscordSettings {
@@ -47,7 +47,10 @@ impl Config {
         if browser_path.exists() {
             true
         } else {
-            self.cookies_path.exists() && std::fs::metadata(&self.cookies_path).map(|m| m.len() > 0).unwrap_or(false)
+            self.cookies_path.exists()
+                && std::fs::metadata(&self.cookies_path)
+                    .map(|m| m.len() > 0)
+                    .unwrap_or(false)
         }
     }
 
@@ -65,7 +68,9 @@ impl Config {
     pub fn get_browser(&self) -> Option<String> {
         let browser_path = self.config_dir.join("browser.txt");
         if browser_path.exists() {
-            std::fs::read_to_string(&browser_path).ok().map(|s| s.trim().to_string())
+            std::fs::read_to_string(&browser_path)
+                .ok()
+                .map(|s| s.trim().to_string())
         } else {
             None
         }
@@ -84,15 +89,21 @@ impl Config {
 
     pub async fn login(&self, browser: &str) -> Result<(), anyhow::Error> {
         let yt_dlp_path = self.ensure_yt_dlp().await?;
-        println!("  🔑 Verifying cookies from {}... (Please close the browser if it is Chromium-based)", browser);
-        
+        println!(
+            "  🔑 Verifying cookies from {}... (Please close the browser if it is Chromium-based)",
+            browser
+        );
+
         let output = tokio::process::Command::new(&yt_dlp_path)
             .args(&[
-                "--js-runtimes", &self.get_js_runtime_arg(),
-                "--remote-components", "ejs:github",
-                "--cookies-from-browser", browser,
+                "--js-runtimes",
+                &self.get_js_runtime_arg(),
+                "--remote-components",
+                "ejs:github",
+                "--cookies-from-browser",
+                browser,
                 "--skip-download",
-                "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+                "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
             ])
             .output()
             .await?;
@@ -114,11 +125,14 @@ impl Config {
 
     pub async fn ensure_yt_dlp(&self) -> Result<PathBuf, anyhow::Error> {
         // 1. Check if we have a working yt-dlp in our local data directory venv
-        let local_venv_bin = self.db_path.parent().unwrap()
+        let local_venv_bin = self
+            .db_path
+            .parent()
+            .unwrap()
             .join("venv")
             .join("bin")
             .join("yt-dlp");
-        
+
         if local_venv_bin.exists() {
             return Ok(local_venv_bin);
         }
@@ -132,15 +146,18 @@ impl Config {
         // 3. If neither exists, we'll auto-initialize a virtualenv in the local data directory and install yt-dlp
         let venv_dir = self.db_path.parent().unwrap().join("venv");
         println!("Initializing local yt-dlp python dependency (one-time setup)...");
-        
+
         // Run python3 -m venv <venv_dir>
         let status = tokio::process::Command::new("python3")
             .args(&["-m", "venv", &venv_dir.to_string_lossy()])
             .status()
             .await?;
-        
+
         if !status.success() {
-            return Err(anyhow::anyhow!("Failed to create python virtual environment at {:?}", venv_dir));
+            return Err(anyhow::anyhow!(
+                "Failed to create python virtual environment at {:?}",
+                venv_dir
+            ));
         }
 
         // Run venv/bin/pip install -U yt-dlp
@@ -149,7 +166,7 @@ impl Config {
             .args(&["install", "-U", "yt-dlp"])
             .status()
             .await?;
-        
+
         if !status.success() {
             return Err(anyhow::anyhow!("Failed to install yt-dlp via pip"));
         }
@@ -158,7 +175,9 @@ impl Config {
             println!("yt-dlp initialized successfully!");
             Ok(local_venv_bin)
         } else {
-            Err(anyhow::anyhow!("yt-dlp executable not found after successful installation"))
+            Err(anyhow::anyhow!(
+                "yt-dlp executable not found after successful installation"
+            ))
         }
     }
 
@@ -177,4 +196,3 @@ impl Config {
         Ok(())
     }
 }
-

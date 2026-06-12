@@ -1,11 +1,11 @@
+use anyhow::Result;
+use rodio::{OutputStream, OutputStreamHandle, Sink, Source};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
-use anyhow::Result;
-use rodio::{OutputStream, OutputStreamHandle, Sink, Source};
 
 // ---------------------------------------------------------------------------
 // Shared Visualizer State
@@ -282,12 +282,17 @@ impl SymphoniaDecoder {
             ..Default::default()
         };
         let metadata_opts = symphonia::core::meta::MetadataOptions::default();
-        let mut probed = symphonia::default::get_probe()
-            .format(&hint, mss, &format_opts, &metadata_opts)?;
+        let mut probed =
+            symphonia::default::get_probe().format(&hint, mss, &format_opts, &metadata_opts)?;
 
-        let track = probed.format.default_track()
+        let track = probed
+            .format
+            .default_track()
             .or_else(|| {
-                probed.format.tracks().iter()
+                probed
+                    .format
+                    .tracks()
+                    .iter()
                     .find(|t| t.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL)
             })
             .ok_or_else(|| anyhow::anyhow!("No supported audio track found"))?
@@ -295,10 +300,14 @@ impl SymphoniaDecoder {
 
         let track_id = track.id;
 
-        let mut decoder = symphonia::default::get_codecs()
-            .make(&track.codec_params, &symphonia::core::codecs::DecoderOptions::default())?;
+        let mut decoder = symphonia::default::get_codecs().make(
+            &track.codec_params,
+            &symphonia::core::codecs::DecoderOptions::default(),
+        )?;
 
-        let total_duration = track.codec_params.time_base
+        let total_duration = track
+            .codec_params
+            .time_base
             .zip(track.codec_params.n_frames)
             .map(|(base, frames)| base.calc_time(frames));
 
@@ -326,7 +335,10 @@ impl SymphoniaDecoder {
         })
     }
 
-    fn refine_position(&mut self, seek_res: symphonia::core::formats::SeekedTo) -> std::result::Result<(), symphonia::core::errors::Error> {
+    fn refine_position(
+        &mut self,
+        seek_res: symphonia::core::formats::SeekedTo,
+    ) -> std::result::Result<(), symphonia::core::errors::Error> {
         let mut samples_to_pass = seek_res.required_ts - seek_res.actual_ts;
         let packet = loop {
             let candidate = self.format.next_packet()?;
@@ -348,7 +360,10 @@ impl SymphoniaDecoder {
         let decoded = decoded?;
         let spec = decoded.spec().to_owned();
         let capacity = decoded.capacity() as u64;
-        if self.buffer_duration < capacity || self.spec.rate != spec.rate || self.spec.channels != spec.channels {
+        if self.buffer_duration < capacity
+            || self.spec.rate != spec.rate
+            || self.spec.channels != spec.channels
+        {
             let duration = symphonia::core::units::Duration::from(capacity);
             self.buffer = symphonia::core::audio::SampleBuffer::<i16>::new(duration, spec);
             self.buffer_duration = capacity;
@@ -377,7 +392,10 @@ impl Iterator for SymphoniaDecoder {
             let decoded = decoded.ok()?;
             let spec = decoded.spec().to_owned();
             let capacity = decoded.capacity() as u64;
-            if self.buffer_duration < capacity || self.spec.rate != spec.rate || self.spec.channels != spec.channels {
+            if self.buffer_duration < capacity
+                || self.spec.rate != spec.rate
+                || self.spec.channels != spec.channels
+            {
                 let duration = symphonia::core::units::Duration::from(capacity);
                 self.buffer = symphonia::core::audio::SampleBuffer::<i16>::new(duration, spec);
                 self.buffer_duration = capacity;
@@ -413,14 +431,19 @@ impl Source for SymphoniaDecoder {
     #[inline]
     fn total_duration(&self) -> Option<Duration> {
         self.total_duration
-            .map(|symphonia::core::units::Time { seconds, frac }| Duration::new(seconds, (frac * 1_000_000_000.0) as u32))
+            .map(|symphonia::core::units::Time { seconds, frac }| {
+                Duration::new(seconds, (frac * 1_000_000_000.0) as u32)
+            })
     }
 
     fn try_seek(&mut self, pos: Duration) -> std::result::Result<(), rodio::source::SeekError> {
         use symphonia::core::formats::{SeekMode, SeekTo};
 
-        let seek_beyond_end = self.total_duration
-            .map(|symphonia::core::units::Time { seconds, frac }| Duration::new(seconds, (frac * 1_000_000_000.0) as u32))
+        let seek_beyond_end = self
+            .total_duration
+            .map(|symphonia::core::units::Time { seconds, frac }| {
+                Duration::new(seconds, (frac * 1_000_000_000.0) as u32)
+            })
             .is_some_and(|dur| dur.saturating_sub(pos).as_millis() < 1);
 
         let time = if seek_beyond_end {
@@ -471,7 +494,10 @@ impl AudioPlayer {
         })
     }
 
-    pub fn play_local(&self, file_path: PathBuf) -> Result<(Sink, Duration, Arc<VisualizerShared>)> {
+    pub fn play_local(
+        &self,
+        file_path: PathBuf,
+    ) -> Result<(Sink, Duration, Arc<VisualizerShared>)> {
         let file = File::open(&file_path)?;
         let ext = file_path.extension().and_then(|e| e.to_str());
         let source = SymphoniaDecoder::new(file, ext)?;

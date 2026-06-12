@@ -1,7 +1,7 @@
-use dialoguer::theme::ColorfulTheme;
+use comfy_table::{modifiers, presets, Attribute, Color, Table};
 use dialoguer::console::Style as DialoguerStyle;
+use dialoguer::theme::ColorfulTheme;
 use owo_colors::{OwoColorize, Rgb, Style};
-use comfy_table::{Table, Color, Attribute, presets, modifiers};
 
 // Theme color constants using RGB for owo-colors
 pub const COLOR_PRIMARY: (u8, u8, u8) = (147, 112, 219); // Medium Purple
@@ -15,10 +15,21 @@ pub fn print_banner() {
     let accent = Rgb(COLOR_ACCENT.0, COLOR_ACCENT.1, COLOR_ACCENT.2);
 
     println!();
-    println!("{}", "  ┌────────────────────────────────────────────────────────┐".color(blue));
-    println!("  {}                {}                {}", "│".color(blue), "🎧  YOUTUBE MUSIC CLI  🎧".color(purple).bold(), "│".color(blue));
-    println!("{}", "  └────────────────────────────────────────────────────────┘".color(blue));
-    
+    println!(
+        "{}",
+        "  ┌────────────────────────────────────────────────────────┐".color(blue)
+    );
+    println!(
+        "  {}                {}                {}",
+        "│".color(blue),
+        "🎧  YOUTUBE MUSIC CLI  🎧".color(purple).bold(),
+        "│".color(blue)
+    );
+    println!(
+        "{}",
+        "  └────────────────────────────────────────────────────────┘".color(blue)
+    );
+
     let ascii_art = r#"
       __   __ _____ __  __    ____ _     ___ 
       \ \ / /|_   _|  \/  |  / ___| |   |_ _|
@@ -26,7 +37,7 @@ pub fn print_banner() {
         | |    | | | |  | | | |___| |___ | | 
         |_|    |_| |_|  |_|  \____|_____|___|
     "#;
-    
+
     for line in ascii_art.lines() {
         if !line.trim().is_empty() {
             println!("  {}", line.color(accent).bold());
@@ -36,7 +47,9 @@ pub fn print_banner() {
 }
 
 pub fn style_primary_style() -> Style {
-    Style::new().color(Rgb(COLOR_PRIMARY.0, COLOR_PRIMARY.1, COLOR_PRIMARY.2)).bold()
+    Style::new()
+        .color(Rgb(COLOR_PRIMARY.0, COLOR_PRIMARY.1, COLOR_PRIMARY.2))
+        .bold()
 }
 
 pub fn style_secondary_style() -> Style {
@@ -44,7 +57,9 @@ pub fn style_secondary_style() -> Style {
 }
 
 pub fn style_accent_style() -> Style {
-    Style::new().color(Rgb(COLOR_ACCENT.0, COLOR_ACCENT.1, COLOR_ACCENT.2)).bold()
+    Style::new()
+        .color(Rgb(COLOR_ACCENT.0, COLOR_ACCENT.1, COLOR_ACCENT.2))
+        .bold()
 }
 
 pub fn style_dim_style() -> Style {
@@ -85,18 +100,38 @@ pub fn get_dialoguer_theme() -> ColorfulTheme {
     let mut theme = ColorfulTheme::default();
     theme.defaults_style = DialoguerStyle::new().cyan();
     theme.prompt_style = DialoguerStyle::new().bold().color256(141); // Orchid/Purple
-    theme.prompt_prefix = DialoguerStyle::new().color256(61).bold().apply_to("?".to_string()); // Dark Slate Blue / Indigo
-    theme.prompt_suffix = DialoguerStyle::new().color256(244).apply_to("»".to_string()); // Dim gray
-    theme.success_prefix = DialoguerStyle::new().bold().green().apply_to("✔".to_string());
-    theme.success_suffix = DialoguerStyle::new().color256(244).apply_to("·".to_string());
+    theme.prompt_prefix = DialoguerStyle::new()
+        .color256(61)
+        .bold()
+        .apply_to("?".to_string()); // Dark Slate Blue / Indigo
+    theme.prompt_suffix = DialoguerStyle::new()
+        .color256(244)
+        .apply_to("»".to_string()); // Dim gray
+    theme.success_prefix = DialoguerStyle::new()
+        .bold()
+        .green()
+        .apply_to("✔".to_string());
+    theme.success_suffix = DialoguerStyle::new()
+        .color256(244)
+        .apply_to("·".to_string());
     theme.error_style = DialoguerStyle::new().red().bold();
     theme.error_prefix = DialoguerStyle::new().red().bold().apply_to("✘".to_string());
     theme.active_item_style = DialoguerStyle::new().bold().color256(141); // Orchid/Purple highlight
     theme.inactive_item_style = DialoguerStyle::new().color256(61); // Slate Blue
-    theme.active_item_prefix = DialoguerStyle::new().color256(186).bold().apply_to(">".to_string()); // Accent pointer
-    theme.inactive_item_prefix = DialoguerStyle::new().color256(240).apply_to(" ".to_string());
-    theme.checked_item_prefix = DialoguerStyle::new().color256(186).bold().apply_to("[x]".to_string());
-    theme.unchecked_item_prefix = DialoguerStyle::new().color256(240).apply_to("[ ]".to_string());
+    theme.active_item_prefix = DialoguerStyle::new()
+        .color256(186)
+        .bold()
+        .apply_to(">".to_string()); // Accent pointer
+    theme.inactive_item_prefix = DialoguerStyle::new()
+        .color256(240)
+        .apply_to(" ".to_string());
+    theme.checked_item_prefix = DialoguerStyle::new()
+        .color256(186)
+        .bold()
+        .apply_to("[x]".to_string());
+    theme.unchecked_item_prefix = DialoguerStyle::new()
+        .color256(240)
+        .apply_to("[ ]".to_string());
     theme.hint_style = DialoguerStyle::new().color256(244);
     theme.values_style = DialoguerStyle::new().cyan();
     theme
@@ -105,14 +140,14 @@ pub fn get_dialoguer_theme() -> ColorfulTheme {
 /// Creates a new comfy-table with our custom styling preset
 pub fn create_styled_table() -> Table {
     let mut table = Table::new();
-    
+
     // Use nice rounded/UTF-8 box borders
     table.load_preset(presets::UTF8_FULL);
     table.apply_modifier(modifiers::UTF8_ROUND_CORNERS);
-    
+
     // Apply styling rules: Purple/blue header with dim borders
     table.set_content_arrangement(comfy_table::ContentArrangement::Dynamic);
-    
+
     table
 }
 

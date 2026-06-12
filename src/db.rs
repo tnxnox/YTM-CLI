@@ -1,6 +1,6 @@
+use rusqlite::{params, Connection, Result};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use rusqlite::{params, Connection, Result};
 
 #[derive(Debug, Clone)]
 pub struct CachedTrack {
@@ -29,7 +29,7 @@ pub struct Db {
 impl Db {
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
         let conn = Connection::open(path)?;
-        
+
         // Initialize tables
         conn.execute(
             "CREATE TABLE IF NOT EXISTS cached_tracks (
@@ -63,9 +63,9 @@ impl Db {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT video_id, title, artist, duration_secs, file_path, cached_at 
-             FROM cached_tracks WHERE video_id = ?1"
+             FROM cached_tracks WHERE video_id = ?1",
         )?;
-        
+
         let mut rows = stmt.query(params![video_id])?;
         if let Some(row) = rows.next()? {
             Ok(Some(CachedTrack {
@@ -103,9 +103,9 @@ impl Db {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT video_id, title, artist, duration_secs, file_path, cached_at 
-             FROM cached_tracks ORDER BY cached_at DESC"
+             FROM cached_tracks ORDER BY cached_at DESC",
         )?;
-        
+
         let rows = stmt.query_map([], |row| {
             Ok(CachedTrack {
                 video_id: row.get(0)?,
@@ -154,9 +154,9 @@ impl Db {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, video_id, title, artist, played_at 
-             FROM history ORDER BY played_at DESC LIMIT ?1"
+             FROM history ORDER BY played_at DESC LIMIT ?1",
         )?;
-        
+
         let rows = stmt.query_map(params![limit], |row| {
             Ok(HistoryEntry {
                 id: row.get(0)?,

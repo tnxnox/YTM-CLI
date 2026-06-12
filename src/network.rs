@@ -63,14 +63,17 @@ impl NetworkClient {
     }
 
     pub async fn search(&self, query: &str) -> Result<Vec<TrackInfo>, anyhow::Error> {
-        let search_result = self.client.query()
+        let search_result = self
+            .client
+            .query()
             .music_search_tracks(query)
             .await
             .map_err(|e| anyhow::anyhow!("Search error: {:?}", e))?;
-        
+
         let mut tracks = Vec::new();
         for track in search_result.items.items {
-            let artist_name = track.artists
+            let artist_name = track
+                .artists
                 .first()
                 .map(|a| a.name.clone())
                 .unwrap_or_else(|| "Unknown".to_string());
@@ -93,8 +96,10 @@ impl NetworkClient {
         let output = tokio::process::Command::new(yt_dlp_path)
             .args(&[
                 "--no-warnings",
-                "--js-runtimes", js_runtime,
-                "--remote-components", "ejs:github",
+                "--js-runtimes",
+                js_runtime,
+                "--remote-components",
+                "ejs:github",
                 "-g",
                 "-f",
                 "ba[ext=m4a]/ba",
@@ -105,7 +110,10 @@ impl NetworkClient {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!("yt-dlp failed to extract stream URL: {}", stderr));
+            return Err(anyhow::anyhow!(
+                "yt-dlp failed to extract stream URL: {}",
+                stderr
+            ));
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -128,27 +136,36 @@ impl NetworkClient {
         let mut cmd = tokio::process::Command::new(yt_dlp_path);
         cmd.args(&[
             "--no-warnings",
-            "--js-runtimes", js_runtime,
-            "--remote-components", "ejs:github",
+            "--js-runtimes",
+            js_runtime,
+            "--remote-components",
+            "ejs:github",
             "--flat-playlist",
             "-J",
         ]);
-        
+
         if let Some(b) = browser {
             cmd.arg("--cookies-from-browser").arg(b);
-        } else if cookies_path.exists() && std::fs::metadata(cookies_path).map(|m| m.len() > 0).unwrap_or(false) {
+        } else if cookies_path.exists()
+            && std::fs::metadata(cookies_path)
+                .map(|m| m.len() > 0)
+                .unwrap_or(false)
+        {
             cmd.arg("--cookies").arg(cookies_path);
         }
-        
+
         cmd.arg(playlist_url);
-        
+
         // Ensure child process is killed if we abort the task
         cmd.kill_on_drop(true);
-        
+
         let output = cmd.output().await?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!("Failed to fetch playlist details: {}", stderr));
+            return Err(anyhow::anyhow!(
+                "Failed to fetch playlist details: {}",
+                stderr
+            ));
         }
 
         let dump: YtDlpPlaylistDump = serde_json::from_slice(&output.stdout)?;
@@ -162,7 +179,8 @@ impl NetworkClient {
                 };
 
                 let title = entry.title.unwrap_or_else(|| "Unknown Title".to_string());
-                let artist = entry.uploader
+                let artist = entry
+                    .uploader
                     .or(entry.channel)
                     .unwrap_or_else(|| "Unknown Artist".to_string());
 
@@ -190,29 +208,38 @@ impl NetworkClient {
         let mut cmd = tokio::process::Command::new(yt_dlp_path);
         cmd.args(&[
             "--no-warnings",
-            "--js-runtimes", js_runtime,
-            "--remote-components", "ejs:github",
+            "--js-runtimes",
+            js_runtime,
+            "--remote-components",
+            "ejs:github",
             "--flat-playlist",
             "-J",
         ]);
-        
+
         if let Some(b) = browser {
             cmd.arg("--cookies-from-browser").arg(b);
-        } else if cookies_path.exists() && std::fs::metadata(cookies_path).map(|m| m.len() > 0).unwrap_or(false) {
+        } else if cookies_path.exists()
+            && std::fs::metadata(cookies_path)
+                .map(|m| m.len() > 0)
+                .unwrap_or(false)
+        {
             cmd.arg("--cookies").arg(cookies_path);
         } else {
             return Err(anyhow::anyhow!("Not logged in (browser.txt or cookies.txt not found). Use the login feature first."));
         }
-        
+
         cmd.arg("https://www.youtube.com/feed/playlists");
-        
+
         // Ensure child process is killed if we abort the task
         cmd.kill_on_drop(true);
-        
+
         let output = cmd.output().await?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!("Failed to fetch library playlists: {}", stderr));
+            return Err(anyhow::anyhow!(
+                "Failed to fetch library playlists: {}",
+                stderr
+            ));
         }
 
         let dump: YtDlpLibraryDump = serde_json::from_slice(&output.stdout)?;
@@ -225,7 +252,9 @@ impl NetworkClient {
                     _ => continue,
                 };
 
-                let title = entry.title.unwrap_or_else(|| "Untitled Playlist".to_string());
+                let title = entry
+                    .title
+                    .unwrap_or_else(|| "Untitled Playlist".to_string());
                 let track_count = entry.playlist_count;
 
                 playlists.push(PlaylistInfo {
@@ -237,11 +266,14 @@ impl NetworkClient {
         }
 
         // Add Liked Music at the top
-        playlists.insert(0, PlaylistInfo {
-            id: "LM".to_string(),
-            title: "Liked Music".to_string(),
-            track_count: None,
-        });
+        playlists.insert(
+            0,
+            PlaylistInfo {
+                id: "LM".to_string(),
+                title: "Liked Music".to_string(),
+                track_count: None,
+            },
+        );
 
         Ok(playlists)
     }
@@ -250,14 +282,17 @@ impl NetworkClient {
         &self,
         video_id: &str,
     ) -> Result<(Vec<TrackInfo>, Option<(String, ContinuationEndpoint)>), anyhow::Error> {
-        let radio = self.client.query()
+        let radio = self
+            .client
+            .query()
             .music_radio_track(video_id)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to fetch autoplay tracks: {:?}", e))?;
-        
+
         let mut tracks = Vec::new();
         for item in radio.items {
-            let artist_name = item.artists
+            let artist_name = item
+                .artists
                 .first()
                 .map(|a| a.name.clone())
                 .unwrap_or_else(|| "Unknown".to_string());
@@ -268,7 +303,7 @@ impl NetworkClient {
                 duration_secs: item.duration,
             });
         }
-        
+
         let continuation = radio.ctoken.map(|tok| (tok, radio.endpoint));
         Ok((tracks, continuation))
     }
@@ -279,13 +314,15 @@ impl NetworkClient {
         endpoint: ContinuationEndpoint,
     ) -> Result<(Vec<TrackInfo>, Option<String>), anyhow::Error> {
         let query = self.client.query();
-        let paginator = query.continuation::<rustypipe::model::TrackItem, _>(ctoken, endpoint, None)
+        let paginator = query
+            .continuation::<rustypipe::model::TrackItem, _>(ctoken, endpoint, None)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to fetch continuation tracks: {:?}", e))?;
-        
+
         let mut tracks = Vec::new();
         for item in paginator.items {
-            let artist_name = item.artists
+            let artist_name = item
+                .artists
                 .first()
                 .map(|a| a.name.clone())
                 .unwrap_or_else(|| "Unknown".to_string());
@@ -296,19 +333,22 @@ impl NetworkClient {
                 duration_secs: item.duration,
             });
         }
-        
+
         Ok((tracks, paginator.ctoken))
     }
 
     pub async fn search_albums(&self, query: &str) -> Result<Vec<AlbumInfo>, anyhow::Error> {
-        let search_result = self.client.query()
+        let search_result = self
+            .client
+            .query()
             .music_search_albums(query)
             .await
             .map_err(|e| anyhow::anyhow!("Search error: {:?}", e))?;
-        
+
         let mut albums = Vec::new();
         for album in search_result.items.items {
-            let artist_name = album.artists
+            let artist_name = album
+                .artists
                 .first()
                 .map(|a| a.name.clone())
                 .unwrap_or_else(|| "Unknown".to_string());
