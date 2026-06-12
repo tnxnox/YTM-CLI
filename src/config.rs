@@ -78,8 +78,12 @@ impl Config {
 
     pub fn get_js_runtime_arg(&self) -> String {
         use std::path::Path;
-        if let Ok(home) = std::env::var("HOME") {
-            let local_node = Path::new(&home).join(".local").join("bin").join("node");
+        if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
+            let local_node = if cfg!(windows) {
+                Path::new(&home).join(".local").join("bin").join("node.exe")
+            } else {
+                Path::new(&home).join(".local").join("bin").join("node")
+            };
             if local_node.exists() {
                 return format!("node:{}", local_node.to_string_lossy());
             }
@@ -124,44 +128,60 @@ impl Config {
     }
 
     pub async fn ensure_yt_dlp(&self) -> Result<PathBuf, anyhow::Error> {
-        // 1. Check if we have a working yt-dlp in our local data directory venv
-        let local_venv_bin = self
-            .db_path
-            .parent()
-            .unwrap()
-            .join("venv")
-            .join("bin")
-            .join("yt-dlp");
+        let venv_dir = self.db_path.parent().unwrap().join("venv");
 
+        let (bin_dir_name, yt_dlp_name, pip_name) = if cfg!(windows) {
+            ("Scripts", "yt-dlp.exe", "pip.exe")
+        } else {
+            ("bin", "yt-dlp", "pip")
+        };
+
+        // 1. Check if we have a working yt-dlp in our local data directory venv
+        let local_venv_bin = venv_dir.join(bin_dir_name).join(yt_dlp_name);
         if local_venv_bin.exists() {
             return Ok(local_venv_bin);
         }
 
         // 2. Check if we have a dev venv in the current directory
-        let dev_venv_bin = PathBuf::from("venv").join("bin").join("yt-dlp");
+        let dev_venv_bin = PathBuf::from("venv").join(bin_dir_name).join(yt_dlp_name);
         if dev_venv_bin.exists() {
             return Ok(dev_venv_bin);
         }
 
         // 3. If neither exists, we'll auto-initialize a virtualenv in the local data directory and install yt-dlp
-        let venv_dir = self.db_path.parent().unwrap().join("venv");
         println!("Initializing local yt-dlp python dependency (one-time setup)...");
 
-        // Run python3 -m venv <venv_dir>
-        let status = tokio::process::Command::new("python3")
-            .args(&["-m", "venv", &venv_dir.to_string_lossy()])
-            .status()
-            .await?;
+        // Try commands sequentially: "python3", "python", then "py"
+        let python_cmds = if cfg!(windows) {
+            vec!["python", "py", "python3"]
+        } else {
+            vec!["python3", "python"]
+        };
 
-        if !status.success() {
+        let mut success = false;
+        for cmd in &python_cmds {
+            let status = tokio::process::Command::new(cmd)
+                .args(&["-m", "venv", &venv_dir.to_string_lossy()])
+                .status()
+                .await;
+
+            if let Ok(s) = status {
+                if s.success() {
+                    success = true;
+                    break;
+                }
+            }
+        }
+
+        if !success {
             return Err(anyhow::anyhow!(
-                "Failed to create python virtual environment at {:?}",
-                venv_dir
+                "Failed to create python virtual environment. Please ensure Python is installed and in your PATH (tried commands: {:?})",
+                python_cmds
             ));
         }
 
-        // Run venv/bin/pip install -U yt-dlp
-        let pip_bin = venv_dir.join("bin").join("pip");
+        // Run pip install -U yt-dlp
+        let pip_bin = venv_dir.join(bin_dir_name).join(pip_name);
         let status = tokio::process::Command::new(&pip_bin)
             .args(&["install", "-U", "yt-dlp"])
             .status()
