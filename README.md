@@ -1,5 +1,6 @@
 # 🎧 YTM-CLI: YouTube Music CLI Player
 
+[![CI](https://github.com/tnxnox/YTM-CLI/actions/workflows/ci.yml/badge.svg)](https://github.com/tnxnox/YTM-CLI/actions/workflows/ci.yml)
 [![Rust](https://img.shields.io/badge/Rust-2021-black?logo=rust)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Ko-fi](https://img.shields.io/badge/Ko--fi-Support-FF5E5B?logo=kofi)](https://ko-fi.com/thenoix)
@@ -17,7 +18,9 @@ A lightweight, high-performance, and feature-rich YouTube Music client for the t
   - Seamless RGB horizontal color gradients (Slate Blue ➔ Purple ➔ Orchid).
   - Non-linear square root amplitude compression to prevent height pegging/clipping.
   - Rendered at ~25 FPS across 5 terminal rows using Unicode block elements (` ▂▃▄▅▆▇█`).
+- **💿 Album Search & Playback:** Search for albums/EPs directly, select an album from the interactive menu, and play all its tracks in sequence.
 - **📻 Smart Autoplay (Infinite Queue):** Automatically creates a radio queue based on your selected track and dynamically fetches continuations in the background as you play.
+- **🤖 Discord Selfbot Mode:** Remote control your Discord `Jockie Music` bot directly from your terminal. Playback controls are seamlessly synchronized with the Discord bot.
 - **⚡ Background Prefetching:** Automatically pre-downloads the next track in the queue in the background for zero-latency, gapless transitions.
 - **💾 Local Caching:** Audio is cached locally as `.flac` files (avoiding seeking distortion and decoder panics) and tracked in a local SQLite database.
 - **🔑 Account Integration:** Seamless cookie extraction from local browsers (Firefox, Chrome, Brave, Chromium, Edge, Opera, Vivaldi) to load and play your private library playlists.
@@ -47,8 +50,10 @@ During playback, you can control the music in real time:
 
 ### Dependencies
 You must have the following tools installed and available in your `PATH`:
-1. [yt-dlp](https://github.com/yt-dlp/yt-dlp) (used for audio extraction)
-2. `ffmpeg` (required by `yt-dlp` for FLAC extraction)
+1. Python 3 (required for `yt-dlp` virtual environment)
+2. `ffmpeg` (required for audio extraction)
+
+*Note: You do not need to install `yt-dlp` manually. The application automatically creates a Python virtual environment and installs/updates `yt-dlp` locally on the first run (cross-platform compatible).*
 
 ### Build
 Clone the repository and build the binary:
@@ -75,9 +80,17 @@ You can also run one-off commands directly:
   ```bash
   ytm-cli play "Rim'K Air Max Ninho"
   ```
+- **Play an album entirely by name:**
+  ```bash
+  ytm-cli album "Nevermind"
+  ```
 - **Search and print a table of tracks:**
   ```bash
   ytm-cli search "Rim'K Air Max"
+  ```
+- **Search and print a table of matching albums:**
+  ```bash
+  ytm-cli search-album "Nevermind"
   ```
 - **Play a public/private playlist (with optional shuffle):**
   ```bash
