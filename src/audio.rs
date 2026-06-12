@@ -85,6 +85,7 @@ pub struct VisualizerSource<S> {
     shared: Arc<VisualizerShared>,
     lp_states: [f32; 7],
     envs: [f32; 8],
+    sample_count: usize,
 }
 
 impl<S> VisualizerSource<S> {
@@ -94,6 +95,7 @@ impl<S> VisualizerSource<S> {
             shared,
             lp_states: [0.0; 7],
             envs: [0.0; 8],
+            sample_count: 0,
         }
     }
 }
@@ -147,7 +149,14 @@ where
                 let env = &mut self.envs[i];
                 let alpha = if abs_b > *env { 0.15 } else { 0.003 }; // fast attack, slow decay
                 *env = *env + alpha * (abs_b - *env);
-                self.shared.set_band(i, *env);
+            }
+
+            self.sample_count += 1;
+            if self.sample_count >= 512 {
+                for i in 0..8 {
+                    self.shared.set_band(i, self.envs[i]);
+                }
+                self.sample_count = 0;
             }
 
             Some(sample)
@@ -229,6 +238,7 @@ pub struct SymphoniaDecoder {
     format: Box<dyn symphonia::core::formats::FormatReader>,
     total_duration: Option<symphonia::core::units::Time>,
     buffer: symphonia::core::audio::SampleBuffer<i16>,
+    buffer_duration: u64,
     spec: symphonia::core::audio::SignalSpec,
 }
 
@@ -302,6 +312,7 @@ impl SymphoniaDecoder {
 
         let decoded = decoder.decode(&packet)?;
         let spec = decoded.spec().to_owned();
+        let buffer_duration = decoded.capacity() as u64;
         let buffer = get_buffer(decoded, &spec);
 
         Ok(Self {
@@ -310,6 +321,7 @@ impl SymphoniaDecoder {
             format: probed.format,
             total_duration,
             buffer,
+            buffer_duration,
             spec,
         })
     }
@@ -334,8 +346,15 @@ impl SymphoniaDecoder {
         }
 
         let decoded = decoded?;
-        self.spec = decoded.spec().to_owned();
-        self.buffer = get_buffer(decoded, &self.spec);
+        let spec = decoded.spec().to_owned();
+        let capacity = decoded.capacity() as u64;
+        if self.buffer_duration < capacity || self.spec.rate != spec.rate || self.spec.channels != spec.channels {
+            let duration = symphonia::core::units::Duration::from(capacity);
+            self.buffer = symphonia::core::audio::SampleBuffer::<i16>::new(duration, spec);
+            self.buffer_duration = capacity;
+        }
+        self.spec = spec;
+        self.buffer.copy_interleaved_ref(decoded);
         self.current_frame_offset = samples_to_pass as usize * self.spec.channels.count() as usize;
         Ok(())
     }
@@ -356,8 +375,15 @@ impl Iterator for SymphoniaDecoder {
                 }
             }
             let decoded = decoded.ok()?;
-            self.spec = decoded.spec().to_owned();
-            self.buffer = get_buffer(decoded, &self.spec);
+            let spec = decoded.spec().to_owned();
+            let capacity = decoded.capacity() as u64;
+            if self.buffer_duration < capacity || self.spec.rate != spec.rate || self.spec.channels != spec.channels {
+                let duration = symphonia::core::units::Duration::from(capacity);
+                self.buffer = symphonia::core::audio::SampleBuffer::<i16>::new(duration, spec);
+                self.buffer_duration = capacity;
+            }
+            self.spec = spec;
+            self.buffer.copy_interleaved_ref(decoded);
             self.current_frame_offset = 0;
         }
 
