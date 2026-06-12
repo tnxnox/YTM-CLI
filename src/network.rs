@@ -362,3 +362,52 @@ impl NetworkClient {
         Ok(albums)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_search() {
+        let client = NetworkClient::new();
+        let results = client.search_albums("utopia").await.unwrap();
+        println!("--- ALBUMS RESULTS FOR 'utopia' ---");
+        for album in results {
+            println!("- {} by {} ({:?})", album.title, album.artist, album.year);
+        }
+
+        let results_ts = client.search_albums("travis scott").await.unwrap();
+        println!("--- ALBUMS RESULTS FOR 'travis scott' ---");
+        for album in results_ts {
+            println!("- {} by {} ({:?})", album.title, album.artist, album.year);
+        }
+
+
+        let main_results_utopia = client.client.query().music_search_main("utopia").await.unwrap();
+
+        println!("--- MAIN RESULTS FOR 'utopia' ---");
+        for item in main_results_utopia.items.items {
+            match item {
+                rustypipe::model::MusicItem::Track(t) => println!("Track: {} by {:?}", t.name, t.artists),
+                rustypipe::model::MusicItem::Album(a) => println!("Album: {} by {:?}", a.name, a.artists),
+                rustypipe::model::MusicItem::Artist(art) => println!("Artist: {}", art.name),
+                rustypipe::model::MusicItem::Playlist(p) => println!("Playlist: {}", p.name),
+                rustypipe::model::MusicItem::User(u) => println!("User: {}", u.name),
+            }
+        }
+
+        let main_results_ts = client.client.query().music_search_main("travis scott utopia").await.unwrap();
+        println!("--- MAIN RESULTS FOR 'travis scott utopia' ---");
+        for item in main_results_ts.items.items {
+            match item {
+                rustypipe::model::MusicItem::Track(t) => println!("Track: {} by {:?}", t.name, t.artists),
+                rustypipe::model::MusicItem::Album(a) => println!("Album: {} by {:?}", a.name, a.artists),
+                rustypipe::model::MusicItem::Artist(art) => println!("Artist: {}", art.name),
+                rustypipe::model::MusicItem::Playlist(p) => println!("Playlist: {}", p.name),
+                rustypipe::model::MusicItem::User(u) => println!("User: {}", u.name),
+            }
+        }
+    }
+}
+
+
