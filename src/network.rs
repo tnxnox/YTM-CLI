@@ -15,6 +15,14 @@ pub struct TrackInfo {
 }
 
 #[derive(Debug, Clone)]
+pub struct AlbumInfo {
+    pub id: String,
+    pub title: String,
+    pub artist: String,
+    pub year: Option<u16>,
+}
+
+#[derive(Debug, Clone)]
 pub struct PlaylistInfo {
     pub id: String,
     pub title: String,
@@ -290,5 +298,27 @@ impl NetworkClient {
         }
         
         Ok((tracks, paginator.ctoken))
+    }
+
+    pub async fn search_albums(&self, query: &str) -> Result<Vec<AlbumInfo>, anyhow::Error> {
+        let search_result = self.client.query()
+            .music_search_albums(query)
+            .await
+            .map_err(|e| anyhow::anyhow!("Search error: {:?}", e))?;
+        
+        let mut albums = Vec::new();
+        for album in search_result.items.items {
+            let artist_name = album.artists
+                .first()
+                .map(|a| a.name.clone())
+                .unwrap_or_else(|| "Unknown".to_string());
+            albums.push(AlbumInfo {
+                id: album.id,
+                title: album.name,
+                artist: artist_name,
+                year: album.year,
+            });
+        }
+        Ok(albums)
     }
 }

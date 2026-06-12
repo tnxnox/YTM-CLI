@@ -17,7 +17,7 @@ use owo_colors::OwoColorize;
 
 use crate::config::Config;
 use crate::db::Db;
-use crate::network::{NetworkClient, TrackInfo};
+use crate::network::{NetworkClient, TrackInfo, AlbumInfo};
 use crate::audio::AudioPlayer;
 
 #[derive(Parser)]
@@ -37,8 +37,18 @@ enum Commands {
         /// The search query
         query: String,
     },
+    /// Search and play an album entirely
+    Album {
+        /// The search query
+        query: String,
+    },
     /// Search for tracks matching the query
     Search {
+        /// The search query
+        query: String,
+    },
+    /// Search for albums matching the query
+    SearchAlbum {
         /// The search query
         query: String,
     },
@@ -311,6 +321,30 @@ fn print_track_table(tracks: &[TrackInfo]) {
             theme::style_data_cell(&track.title, true),
             theme::style_data_cell(&track.artist, false),
             theme::style_data_cell(&dur_str, false),
+        ]);
+    }
+    println!("{}", table);
+}
+
+fn print_album_table(albums: &[AlbumInfo]) {
+    let mut table = theme::create_styled_table();
+    table.set_header(vec![
+        theme::style_header_cell("#"),
+        theme::style_header_cell("Title"),
+        theme::style_header_cell("Artist"),
+        theme::style_header_cell("Year"),
+    ]);
+
+    for (i, album) in albums.iter().enumerate() {
+        let year_str = match album.year {
+            Some(y) => y.to_string(),
+            None => "----".to_string(),
+        };
+        table.add_row(vec![
+            theme::style_data_cell(&(i + 1).to_string(), false),
+            theme::style_data_cell(&album.title, true),
+            theme::style_data_cell(&album.artist, false),
+            theme::style_data_cell(&year_str, false),
         ]);
     }
     println!("{}", table);
@@ -937,6 +971,126 @@ fn interact_table_select(
     }
 }
 
+fn interact_album_table_select(
+    prompt: &str,
+    headers: Vec<&str>,
+    albums: &[AlbumInfo],
+    go_back_label: &str,
+) -> Result<Option<usize>> {
+    let mut selected_idx = 0;
+    let num_options = albums.len() + 1;
+
+    let _guard = RawModeGuard::new()?;
+
+    loop {
+        clear_screen();
+        print!("  ❓ {}\r\n\r\n", theme::style_primary(prompt));
+
+        let mut table = theme::create_styled_table();
+        table.set_header(headers.iter().map(|h| theme::style_header_cell(h)).collect::<Vec<_>>());
+
+        for (i, album) in albums.iter().enumerate() {
+            let is_selected = i == selected_idx;
+            let year_str = match album.year {
+                Some(y) => y.to_string(),
+                None => "----".to_string(),
+            };
+
+            let num_cell = if is_selected {
+                comfy_table::Cell::new(format!("> {}", i + 1))
+                    .fg(comfy_table::Color::Rgb { r: theme::COLOR_PRIMARY.0, g: theme::COLOR_PRIMARY.1, b: theme::COLOR_PRIMARY.2 })
+                    .add_attribute(comfy_table::Attribute::Bold)
+            } else {
+                comfy_table::Cell::new(format!("  {}", i + 1))
+                    .fg(comfy_table::Color::Rgb { r: theme::COLOR_DIM.0, g: theme::COLOR_DIM.1, b: theme::COLOR_DIM.2 })
+            };
+
+            let title_cell = if is_selected {
+                comfy_table::Cell::new(&album.title)
+                    .fg(comfy_table::Color::Rgb { r: theme::COLOR_ACCENT.0, g: theme::COLOR_ACCENT.1, b: theme::COLOR_ACCENT.2 })
+                    .add_attribute(comfy_table::Attribute::Bold)
+            } else {
+                comfy_table::Cell::new(&album.title)
+                    .fg(comfy_table::Color::Rgb { r: theme::COLOR_DIM.0, g: theme::COLOR_DIM.1, b: theme::COLOR_DIM.2 })
+            };
+
+            let artist_cell = if is_selected {
+                comfy_table::Cell::new(&album.artist)
+                    .fg(comfy_table::Color::Rgb { r: theme::COLOR_PRIMARY.0, g: theme::COLOR_PRIMARY.1, b: theme::COLOR_PRIMARY.2 })
+                    .add_attribute(comfy_table::Attribute::Bold)
+            } else {
+                comfy_table::Cell::new(&album.artist)
+                    .fg(comfy_table::Color::Rgb { r: theme::COLOR_DIM.0, g: theme::COLOR_DIM.1, b: theme::COLOR_DIM.2 })
+            };
+
+            let year_cell = if is_selected {
+                comfy_table::Cell::new(year_str)
+                    .fg(comfy_table::Color::Rgb { r: theme::COLOR_PRIMARY.0, g: theme::COLOR_PRIMARY.1, b: theme::COLOR_PRIMARY.2 })
+                    .add_attribute(comfy_table::Attribute::Bold)
+            } else {
+                comfy_table::Cell::new(year_str)
+                    .fg(comfy_table::Color::Rgb { r: theme::COLOR_DIM.0, g: theme::COLOR_DIM.1, b: theme::COLOR_DIM.2 })
+            };
+
+            table.add_row(vec![num_cell, title_cell, artist_cell, year_cell]);
+        }
+
+        // Add Go Back row
+        let is_selected = selected_idx == albums.len();
+        let num_cell = if is_selected {
+            comfy_table::Cell::new("> 🔙")
+                .add_attribute(comfy_table::Attribute::Bold)
+        } else {
+            comfy_table::Cell::new("  🔙")
+        };
+        let label_cell = if is_selected {
+            comfy_table::Cell::new(go_back_label)
+                .fg(comfy_table::Color::Rgb { r: theme::COLOR_PRIMARY.0, g: theme::COLOR_PRIMARY.1, b: theme::COLOR_PRIMARY.2 })
+                .add_attribute(comfy_table::Attribute::Bold)
+        } else {
+            comfy_table::Cell::new(go_back_label)
+                .fg(comfy_table::Color::Rgb { r: theme::COLOR_DIM.0, g: theme::COLOR_DIM.1, b: theme::COLOR_DIM.2 })
+        };
+        table.add_row(vec![
+            num_cell,
+            label_cell,
+            comfy_table::Cell::new(""),
+            comfy_table::Cell::new(""),
+        ]);
+
+        for line in table.to_string().lines() {
+            print!("  {}\r\n", line);
+        }
+
+        print!("\r\n  {}\r\n", theme::style_dim("🎮 Controls: [↑/↓] Move  [Enter] Select  [Q/Esc] Back"));
+        std::io::stdout().flush().ok();
+
+        if let Event::Key(key_event) = event::read()? {
+            if key_event.kind == event::KeyEventKind::Press || key_event.kind == event::KeyEventKind::Repeat {
+                match key_event.code {
+                    KeyCode::Up | KeyCode::Char('p') | KeyCode::Char('P') => {
+                        selected_idx = (selected_idx + num_options - 1) % num_options;
+                    }
+                    KeyCode::Down | KeyCode::Char('n') | KeyCode::Char('N') => {
+                        selected_idx = (selected_idx + 1) % num_options;
+                    }
+                    KeyCode::Enter => {
+                        if selected_idx == albums.len() {
+                            return Ok(None);
+                        } else {
+                            return Ok(Some(selected_idx));
+                        }
+                    }
+                    KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => {
+                        return Ok(None);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
 fn interact_history_select(
     prompt: &str,
     headers: Vec<&str>,
@@ -1109,6 +1263,70 @@ async fn run_search_and_play(config: &Config, db: &Db, client: &NetworkClient, c
             }
 
             let _ = play_queue(queue, 0, config, db, client, autoplay_ctoken, current_volume, debug).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn run_search_albums_and_play(config: &Config, db: &Db, client: &NetworkClient, current_volume: &mut f32, debug: bool) -> Result<()> {
+    loop {
+        clear_screen();
+        let query: String = dialoguer::Input::with_theme(&theme::get_dialoguer_theme())
+            .with_prompt("Search Albums on YouTube Music (or 'q' to go back)")
+            .allow_empty(true)
+            .interact_text()?;
+
+        let query = query.trim();
+        if query.is_empty() { continue; }
+        if query.eq_ignore_ascii_case("q") { break; }
+
+        println!("\n  🔍 Searching for albums matching '{}'...", theme::style_primary(query));
+        let albums = client.search_albums(query).await?;
+
+        if albums.is_empty() {
+            println!("  ❌ {}", theme::style_error("No albums found."));
+            press_enter_to_continue();
+            continue;
+        }
+
+        loop {
+            let selection = match interact_album_table_select(
+                "Select album to play",
+                vec!["#", "Title", "Artist", "Year"],
+                &albums,
+                "Search again / Go back",
+            )? {
+                Some(idx) => idx,
+                None => break,
+            };
+
+            let selected_album = &albums[selection];
+            println!("\n  💿 Loading tracks for album '{}'...", theme::style_primary(&selected_album.title));
+
+            let yt_dlp_path = config.ensure_yt_dlp().await?;
+            let browser = config.get_browser();
+            let album_url = format!("https://music.youtube.com/playlist?list={}", selected_album.id);
+
+            match client.fetch_playlist(
+                &yt_dlp_path,
+                browser.as_deref(),
+                &config.cookies_path,
+                &config.get_js_runtime_arg(),
+                &album_url,
+            ).await {
+                Ok(tracks) => {
+                    if tracks.is_empty() {
+                        println!("  ❌ {}", theme::style_error("This album has no tracks."));
+                        press_enter_to_continue();
+                    } else {
+                        let _ = play_queue(tracks, 0, config, db, client, None, current_volume, debug).await?;
+                    }
+                }
+                Err(e) => {
+                    println!("  ❌ {} {}", theme::style_error("Failed to load album tracks:"), e);
+                    press_enter_to_continue();
+                }
+            }
         }
     }
     Ok(())
@@ -1523,7 +1741,8 @@ async fn run_interactive_menu(config: &Config, db: &Db, client: &NetworkClient, 
         let logged_in = config.is_logged_in();
         
         let mut selections = vec![
-            "🔍 Search and Play".to_string(),
+            "🔍 Search and Play (Tracks)".to_string(),
+            "💿 Search Albums".to_string(),
             "📜 Playback History".to_string(),
             "💾 Cache Management".to_string(),
             "🤖 Discord Selfbot Mode".to_string(),
@@ -1544,17 +1763,18 @@ async fn run_interactive_menu(config: &Config, db: &Db, client: &NetworkClient, 
 
         match selection {
             0 => run_search_and_play(config, db, client, current_volume, debug).await?,
-            1 => run_history(config, db, client, current_volume, debug).await?,
-            2 => run_cache_menu(config, db).await?,
-            3 => run_discord_menu(config).await?,
-            4 => {
+            1 => run_search_albums_and_play(config, db, client, current_volume, debug).await?,
+            2 => run_history(config, db, client, current_volume, debug).await?,
+            3 => run_cache_menu(config, db).await?,
+            4 => run_discord_menu(config).await?,
+            5 => {
                 if logged_in {
                     run_library_playlists(config, db, client, current_volume, debug).await?;
                 } else {
                     run_login_flow(config).await?;
                 }
             }
-            5 => {
+            6 => {
                 if logged_in {
                     config.logout()?;
                     println!("  ✨ Logged out successfully.");
@@ -1564,7 +1784,7 @@ async fn run_interactive_menu(config: &Config, db: &Db, client: &NetworkClient, 
                     break;
                 }
             }
-            6 => {
+            7 => {
                 println!("  Goodbye! 👋");
                 break;
             }
@@ -1630,6 +1850,31 @@ async fn main() -> Result<()> {
             }
             play_queue(queue, 0, &config, &db, &client, autoplay_ctoken, &mut current_volume, debug).await?;
         }
+        Some(Commands::Album { query }) => {
+            println!("Searching for album '{}'...", query);
+            let albums = client.search_albums(&query).await?;
+            if albums.is_empty() {
+                println!("No matching album found.");
+                return Ok(());
+            }
+            let selected_album = &albums[0];
+            println!("Loading tracks for album '{}'...", selected_album.title);
+            let yt_dlp_path = config.ensure_yt_dlp().await?;
+            let browser = config.get_browser();
+            let album_url = format!("https://music.youtube.com/playlist?list={}", selected_album.id);
+            let tracks = client.fetch_playlist(
+                &yt_dlp_path,
+                browser.as_deref(),
+                &config.cookies_path,
+                &config.get_js_runtime_arg(),
+                &album_url,
+            ).await?;
+            if tracks.is_empty() {
+                println!("This album has no tracks.");
+                return Ok(());
+            }
+            play_queue(tracks, 0, &config, &db, &client, None, &mut current_volume, debug).await?;
+        }
         Some(Commands::Search { query }) => {
             println!("Searching for '{}'...", query);
             let tracks = client.search(&query).await?;
@@ -1638,6 +1883,15 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
             print_track_table(&tracks);
+        }
+        Some(Commands::SearchAlbum { query }) => {
+            println!("Searching for albums matching '{}'...", query);
+            let albums = client.search_albums(&query).await?;
+            if albums.is_empty() {
+                println!("No albums found.");
+                return Ok(());
+            }
+            print_album_table(&albums);
         }
         Some(Commands::Cache { action }) => {
             match action {
