@@ -1,7 +1,7 @@
 # 🎧 YTM-CLI: YouTube Music CLI Player
 
 [![CI](https://github.com/tnxnox/YTM-CLI/actions/workflows/ci.yml/badge.svg)](https://github.com/tnxnox/YTM-CLI/actions/workflows/ci.yml)
-[![Rust](https://img.shields.io/badge/Rust-2021-black?logo=rust)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/Rust-2024-black?logo=rust)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Ko-fi](https://img.shields.io/badge/Ko--fi-Support-FF5E5B?logo=kofi)](https://ko-fi.com/thenoix)
 

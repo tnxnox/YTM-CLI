@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection, Result};
+use rusqlite::{Connection, Result, params};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -39,6 +39,14 @@ impl Db {
                 duration_secs INTEGER NOT NULL,
                 file_path TEXT NOT NULL,
                 cached_at TEXT NOT NULL
+            );",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
             );",
             [],
         )?;
@@ -172,5 +180,93 @@ impl Db {
             history.push(entry?);
         }
         Ok(history)
+    }
+
+    pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT value FROM settings WHERE key = ?1")?;
+        let mut rows = stmt.query(params![key])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(row.get(0)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_max_cache_size_bytes(&self) -> u64 {
+        let mb = self
+            .get_setting("max_cache_size_mb")
+            .ok()
+            .flatten()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(50); // Default to 50mb
+        mb * 1024 * 1024
+    }
+
+    pub fn update_cached_track_accessed(&self, video_id: &str) -> Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE cached_tracks SET cached_at = ?1 WHERE video_id = ?2",
+            params![now, video_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn enforce_cache_limit(&self, _cache_dir: &Path, max_bytes: u64) -> Result<()> {
+        // Retrieve all cached tracks ordered by cached_at ASC (oldest first)
+        let tracks = {
+            let conn = self.conn.lock().unwrap();
+            let mut stmt = conn
+                .prepare("SELECT video_id, file_path FROM cached_tracks ORDER BY cached_at ASC")?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+
+            let mut tracks = Vec::new();
+            for r in rows {
+                tracks.push(r?);
+            }
+            tracks
+        };
+
+        // Calculate total size of all cached files
+        let mut total_size: u64 = 0;
+        let mut file_sizes = Vec::new();
+        for (video_id, file_path) in &tracks {
+            let path = Path::new(file_path);
+            let size = if path.exists() {
+                path.metadata().map(|m| m.len()).unwrap_or(0)
+            } else {
+                0
+            };
+            total_size += size;
+            file_sizes.push((video_id.clone(), file_path.clone(), size));
+        }
+
+        // Evict files starting from the oldest until total_size <= max_bytes
+        for (video_id, file_path, size) in file_sizes {
+            if total_size <= max_bytes {
+                break;
+            }
+            // Evict this track
+            let path = Path::new(&file_path);
+            if path.exists() {
+                std::fs::remove_file(path).ok();
+            }
+            self.delete_cached_track(&video_id)?;
+            total_size = total_size.saturating_sub(size);
+        }
+
+        Ok(())
     }
 }

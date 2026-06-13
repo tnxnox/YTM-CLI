@@ -123,7 +123,11 @@ impl Config {
             Ok(())
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(anyhow::anyhow!("Login failed. Make sure the browser '{}' is installed, closed (if Chromium-based), and you are logged into YouTube/YouTube Music on it.\nError details: {}", browser, stderr))
+            Err(anyhow::anyhow!(
+                "Login failed. Make sure the browser '{}' is installed, closed (if Chromium-based), and you are logged into YouTube/YouTube Music on it.\nError details: {}",
+                browser,
+                stderr
+            ))
         }
     }
 

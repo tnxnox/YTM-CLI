@@ -12,7 +12,8 @@ use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use owo_colors::OwoColorize;
 use rustypipe::model::paginator::ContinuationEndpoint;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::audio::AudioPlayer;
@@ -23,7 +24,7 @@ use crate::network::{AlbumInfo, NetworkClient, TrackInfo};
 #[derive(Parser)]
 #[command(
     name = "ytm-cli",
-    version = "0.1.0",
+    version = env!("CARGO_PKG_VERSION"),
     about = "YouTube Music CLI client"
 )]
 struct Cli {
@@ -537,21 +538,26 @@ async fn play_track(
         }
     }
 
-    let cache_file = config.cache_dir.join(format!("{}.flac", video_id));
-    let player = AudioPlayer::new()?;
+    let m4a_file = config.cache_dir.join(format!("{}.m4a", video_id));
 
     let cached = db.get_cached_track(video_id)?;
-    let use_cache = if let Some(ref c) = cached {
-        let path = Path::new(&c.file_path);
-        path.exists() && path.extension().map(|ext| ext == "flac").unwrap_or(false)
+    let (use_cache, cache_file) = if let Some(ref c) = cached {
+        let path = std::path::Path::new(&c.file_path);
+        if path.exists() {
+            (true, path.to_path_buf())
+        } else {
+            (false, m4a_file)
+        }
     } else {
-        false
+        (false, m4a_file)
     };
+
+    let player = AudioPlayer::new()?;
 
     // Keep active playback details fresh on a cleared screen
     clear_screen();
 
-    let (sink, visualizer_shared) = if use_cache {
+    let (sink, visualizer_shared, download_info) = if use_cache {
         let track_name = format!("{} - {}", title, artist);
         if let Some((idx, total)) = queue_info {
             println!(
@@ -566,9 +572,10 @@ async fn play_track(
                 theme::style_primary(&track_name)
             );
         }
+        db.update_cached_track_accessed(video_id).ok();
         let (sink, _total_dur, vis) = player.play_local(cache_file.clone())?;
         sink.set_volume(*current_volume);
-        (sink, vis)
+        (sink, vis, None)
     } else {
         // Remove any partial/corrupted cache file on disk
         if cache_file.exists() {
@@ -606,70 +613,123 @@ async fn play_track(
             None
         };
 
+        let client = NetworkClient::new();
         let yt_dlp_path = config.ensure_yt_dlp().await?;
-
-        // Add cookies to download if logged in
-        let mut cmd = tokio::process::Command::new(&yt_dlp_path);
-        cmd.args(&[
-            "--no-warnings",
-            "--js-runtimes",
-            &config.get_js_runtime_arg(),
-            "--remote-components",
-            "ejs:github",
-            "-x",
-            "--audio-format",
-            "flac",
-            &format!("https://www.youtube.com/watch?v={}", video_id),
-            "-o",
-            &config
-                .cache_dir
-                .join(format!("{}.%(ext)s", video_id))
-                .to_string_lossy(),
-        ]);
+        let js_runtime = config.get_js_runtime_arg();
+        let cookies_path = Some(config.cookies_path.as_path());
         let browser = config.get_browser();
-        if let Some(ref b) = browser {
-            cmd.arg("--cookies-from-browser").arg(b);
-        } else if config.cookies_path.exists()
-            && std::fs::metadata(&config.cookies_path)
-                .map(|m| m.len() > 0)
-                .unwrap_or(false)
-        {
-            cmd.arg("--cookies").arg(&config.cookies_path);
-        }
-        cmd.kill_on_drop(true);
 
-        let status = if debug {
-            cmd.status().await?
-        } else {
-            let output = cmd.output().await?;
-            log::debug!("yt-dlp stdout: {}", String::from_utf8_lossy(&output.stdout));
-            log::debug!("yt-dlp stderr: {}", String::from_utf8_lossy(&output.stderr));
-            output.status
+        // Extract the direct stream URL
+        let stream_url = match client
+            .get_stream_url(
+                video_id,
+                &yt_dlp_path,
+                &js_runtime,
+                cookies_path,
+                browser.as_deref(),
+            )
+            .await
+        {
+            Ok(url) => url,
+            Err(e) => {
+                if let Some(ref spinner) = pb {
+                    spinner.finish_and_clear();
+                }
+                println!(
+                    "  ❌ Failed to get stream URL: {}",
+                    theme::style_error(&e.to_string())
+                );
+                press_enter_to_continue();
+                return Err(e);
+            }
         };
+
+        // Create references for background task
+        let cache_file_clone = cache_file.clone();
+        let stream_url_clone = stream_url.clone();
+        let download_complete = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let download_complete_clone = Arc::clone(&download_complete);
+        let total_size = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let total_size_clone = Arc::clone(&total_size);
+
+        // Spawn a background task to download the stream using reqwest
+        let download_handle = tokio::spawn(async move {
+            let req_client = reqwest::Client::new();
+            let mut response = match req_client.get(&stream_url_clone).send().await {
+                Ok(res) => res,
+                Err(e) => {
+                    log::error!("Progressive download failed to send request: {}", e);
+                    download_complete_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+                    return;
+                }
+            };
+
+            // Read Content-Length
+            if let Some(content_len) = response.content_length() {
+                total_size_clone.store(content_len, std::sync::atomic::Ordering::SeqCst);
+            }
+
+            let mut file = match std::fs::File::create(&cache_file_clone) {
+                Ok(f) => f,
+                Err(e) => {
+                    log::error!("Progressive download failed to create file: {}", e);
+                    download_complete_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+                    return;
+                }
+            };
+
+            // Buffer stream bytes
+            while let Ok(Some(chunk)) = response.chunk().await {
+                use std::io::Write;
+                if let Err(e) = file.write_all(&chunk) {
+                    log::error!("Progressive download failed to write to file: {}", e);
+                    break;
+                }
+            }
+            download_complete_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+
+        // Wait a small amount of time for initial bytes to buffer so Symphonia can probe it
+        let mut attempts = 0;
+        loop {
+            if cache_file.exists() {
+                if let Ok(meta) = std::fs::metadata(&cache_file) {
+                    // We need at least 16KB for the container headers to be fully read
+                    if meta.len() > 16384
+                        || download_complete.load(std::sync::atomic::Ordering::SeqCst)
+                    {
+                        break;
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            attempts += 1;
+            if attempts > 50 {
+                // 5 seconds timeout
+                break;
+            }
+        }
 
         if let Some(ref spinner) = pb {
             spinner.finish_and_clear();
         }
 
-        if !status.success() {
-            let err_msg = "Failed to download audio track using yt-dlp";
-            println!("  ❌ {}", theme::style_error(err_msg));
-            press_enter_to_continue();
-            return Err(anyhow::anyhow!(err_msg));
-        }
-
-        // Register cached track in DB
-        let duration_u32 = total_duration.map(|d| d.as_secs() as u32).unwrap_or(0);
-        let file_path_str = cache_file.to_string_lossy().to_string();
-        if let Err(e) =
-            db.insert_cached_track(video_id, title, artist, duration_u32, &file_path_str)
-        {
-            eprintln!("  Failed to register cached track in DB: {}", e);
-        }
-
-        let (sink, _total_dur, vis) = player.play_local(cache_file.clone())?;
+        // Open the file for progressive playback
+        let file = std::fs::File::open(&cache_file)?;
+        let ext = cache_file.extension().and_then(|e| e.to_str());
+        let (sink, _total_dur, vis) = player.play_progressive(
+            file,
+            ext,
+            Arc::clone(&download_complete),
+            Arc::clone(&total_size),
+        )?;
         sink.set_volume(*current_volume);
-        (sink, vis)
+
+        (
+            sink,
+            vis,
+            Some((download_handle, cache_file.clone(), download_complete)),
+        )
     };
 
     db.add_history(video_id, title, artist)?;
@@ -803,37 +863,58 @@ async fn play_track(
         std::io::stdout().flush().ok();
     }
 
+    // Clean up / Register progressive download
+    if let Some((handle, path, complete)) = download_info {
+        if !complete.load(std::sync::atomic::Ordering::SeqCst) {
+            handle.abort();
+            let path_clone = path.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                std::fs::remove_file(path_clone).ok();
+            });
+        } else {
+            let duration_u32 = total_duration.map(|d| d.as_secs() as u32).unwrap_or(0);
+            let file_path_str = path.to_string_lossy().to_string();
+            if let Err(e) =
+                db.insert_cached_track(video_id, title, artist, duration_u32, &file_path_str)
+            {
+                eprintln!("  Failed to register cached track in DB: {}", e);
+            }
+            let max_bytes = db.get_max_cache_size_bytes();
+            let _ = db.enforce_cache_limit(&config.cache_dir, max_bytes);
+        }
+    }
+
     Ok(control)
 }
 
 fn spawn_prefetch(track: TrackInfo, config: Config, db: Db) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let video_id = &track.id;
-        let cache_file = config.cache_dir.join(format!("{}.flac", video_id));
+        let flac_file = config.cache_dir.join(format!("{}.flac", video_id));
+        let m4a_file = config.cache_dir.join(format!("{}.m4a", video_id));
 
         // Check if already exists on disk
-        if cache_file.exists() {
+        if flac_file.exists() || m4a_file.exists() {
             return;
         }
+
+        let cache_file = m4a_file;
 
         // Run yt-dlp to download in background
         if let Ok(yt_dlp_path) = config.ensure_yt_dlp().await {
             let mut cmd = tokio::process::Command::new(&yt_dlp_path);
-            cmd.args(&[
+            cmd.args([
                 "--no-warnings",
                 "--js-runtimes",
                 &config.get_js_runtime_arg(),
                 "--remote-components",
                 "ejs:github",
-                "-x",
-                "--audio-format",
-                "flac",
+                "-f",
+                "ba[ext=m4a]/ba",
                 &format!("https://www.youtube.com/watch?v={}", video_id),
                 "-o",
-                &config
-                    .cache_dir
-                    .join(format!("{}.%(ext)s", video_id))
-                    .to_string_lossy(),
+                &cache_file.to_string_lossy(),
             ]);
             let browser = config.get_browser();
             if let Some(ref b) = browser {
@@ -858,6 +939,8 @@ fn spawn_prefetch(track: TrackInfo, config: Config, db: Db) -> tokio::task::Join
                         duration_u32,
                         &file_path_str,
                     );
+                    let max_bytes = db.get_max_cache_size_bytes();
+                    let _ = db.enforce_cache_limit(&config.cache_dir, max_bytes);
                 }
             }
         }
@@ -1700,10 +1783,15 @@ async fn run_history(
     Ok(())
 }
 
-async fn run_cache_menu(_config: &Config, db: &Db) -> Result<()> {
+async fn run_cache_menu(config: &Config, db: &Db) -> Result<()> {
     loop {
         clear_screen();
-        let selections = &["💾 List cached tracks", "🗑️ Clear cache", "🔙 Go back"];
+        let selections = &[
+            "💾 List cached tracks",
+            "⚙️ Configure cache size limit",
+            "🗑️ Clear cache",
+            "🔙 Go back",
+        ];
 
         let selection = dialoguer::Select::with_theme(&theme::get_dialoguer_theme())
             .with_prompt("Cache Management")
@@ -1746,6 +1834,38 @@ async fn run_cache_menu(_config: &Config, db: &Db) -> Result<()> {
                 press_enter_to_continue();
             }
             1 => {
+                let current_limit = db
+                    .get_setting("max_cache_size_mb")
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| "50".to_string());
+                println!(
+                    "  Current cache size limit: {} MB",
+                    theme::style_primary(&current_limit)
+                );
+
+                let input: String = dialoguer::Input::with_theme(&theme::get_dialoguer_theme())
+                    .with_prompt("Enter new cache size limit in MB")
+                    .default(current_limit)
+                    .interact_text()?;
+
+                if let Ok(mb) = input.trim().parse::<u64>() {
+                    if mb > 0 {
+                        db.set_setting("max_cache_size_mb", &mb.to_string())?;
+                        println!(
+                            "  ✨ Cache size limit updated to {} MB.",
+                            theme::style_primary(&mb.to_string())
+                        );
+                        let _ = db.enforce_cache_limit(&config.cache_dir, mb * 1024 * 1024);
+                    } else {
+                        println!("  ❌ Limit must be greater than 0.");
+                    }
+                } else {
+                    println!("  ❌ Invalid number.");
+                }
+                press_enter_to_continue();
+            }
+            2 => {
                 let tracks = db.list_cached_tracks()?;
                 let count = tracks.len();
 
@@ -1814,10 +1934,13 @@ async fn run_login_flow(config: &Config) -> Result<()> {
         "  Extracting cookies from {}...",
         theme::style_primary(browser)
     );
-    if let Err(e) = config.login(browser).await {
-        println!("  ❌ {}", theme::style_error(&e.to_string()));
-    } else {
-        println!("  ✨ {}", theme::style_primary("Logged in successfully!"));
+    match config.login(browser).await {
+        Err(e) => {
+            println!("  ❌ {}", theme::style_error(&e.to_string()));
+        }
+        _ => {
+            println!("  ✨ {}", theme::style_primary("Logged in successfully!"));
+        }
     }
     press_enter_to_continue();
     Ok(())
@@ -2083,7 +2206,9 @@ async fn run_discord_menu(config: &Config) -> Result<()> {
                 config.save_discord_settings(&s)?;
 
                 if s.enabled {
-                    println!("\n  ✅ Discord Selfbot Mode enabled! (Warning: Selfbots violate Discord TOS. Use at your own risk.)");
+                    println!(
+                        "\n  ✅ Discord Selfbot Mode enabled! (Warning: Selfbots violate Discord TOS. Use at your own risk.)"
+                    );
                 } else {
                     println!("\n  ❌ Discord Selfbot Mode disabled.");
                 }

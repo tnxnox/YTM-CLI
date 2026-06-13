@@ -3,8 +3,8 @@ use rodio::{OutputStream, OutputStreamHandle, Sink, Source};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
 // ---------------------------------------------------------------------------
@@ -229,6 +229,101 @@ impl symphonia::core::io::MediaSource for MySeekableSource {
 }
 
 // ---------------------------------------------------------------------------
+// Custom Progressive File Source Wrapper
+// ---------------------------------------------------------------------------
+
+pub struct ProgressiveFile {
+    file: File,
+    download_complete: Arc<AtomicBool>,
+    total_size: Arc<AtomicU64>,
+}
+
+impl ProgressiveFile {
+    pub fn new(file: File, download_complete: Arc<AtomicBool>, total_size: Arc<AtomicU64>) -> Self {
+        Self {
+            file,
+            download_complete,
+            total_size,
+        }
+    }
+}
+
+impl Read for ProgressiveFile {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            // Try to read available data
+            let n = self.file.read(buf)?;
+            if n > 0 {
+                return Ok(n);
+            }
+
+            // We hit EOF. Check if download is complete.
+            if self.download_complete.load(Ordering::SeqCst) {
+                return Ok(0); // Actually EOF
+            }
+
+            // Sleep and retry
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
+impl Seek for ProgressiveFile {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        let target_pos = match pos {
+            SeekFrom::Start(n) => n,
+            SeekFrom::Current(n) => {
+                let curr = self.file.stream_position()?;
+                if n < 0 {
+                    curr.saturating_sub((-n) as u64)
+                } else {
+                    curr.saturating_add(n as u64)
+                }
+            }
+            SeekFrom::End(n) => {
+                let size = self.total_size.load(Ordering::SeqCst);
+                if size > 0 {
+                    if n < 0 {
+                        size.saturating_sub((-n) as u64)
+                    } else {
+                        size.saturating_add(n as u64)
+                    }
+                } else {
+                    let len = self.file.metadata()?.len();
+                    if n < 0 {
+                        len.saturating_sub((-n) as u64)
+                    } else {
+                        len.saturating_add(n as u64)
+                    }
+                }
+            }
+        };
+
+        // Wait until target_pos is available, unless download is complete
+        loop {
+            let file_len = self.file.metadata()?.len();
+            if target_pos <= file_len || self.download_complete.load(Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        self.file.seek(SeekFrom::Start(target_pos))
+    }
+}
+
+impl symphonia::core::io::MediaSource for ProgressiveFile {
+    fn is_seekable(&self) -> bool {
+        true
+    }
+
+    fn byte_len(&self) -> Option<u64> {
+        let size = self.total_size.load(Ordering::SeqCst);
+        if size > 0 { Some(size) } else { None }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Custom Symphonia Decoder supporting seeking via proper byte_len
 // ---------------------------------------------------------------------------
 
@@ -270,6 +365,78 @@ impl SymphoniaDecoder {
     pub fn new(file: File, extension: Option<&str>) -> Result<Self> {
         let len = file.metadata()?.len();
         let source = MySeekableSource { file, len };
+        let mss = symphonia::core::io::MediaSourceStream::new(Box::new(source), Default::default());
+
+        let mut hint = symphonia::core::probe::Hint::new();
+        if let Some(ext) = extension {
+            hint.with_extension(ext);
+        }
+
+        let format_opts = symphonia::core::formats::FormatOptions {
+            enable_gapless: true,
+            ..Default::default()
+        };
+        let metadata_opts = symphonia::core::meta::MetadataOptions::default();
+        let mut probed =
+            symphonia::default::get_probe().format(&hint, mss, &format_opts, &metadata_opts)?;
+
+        let track = probed
+            .format
+            .default_track()
+            .or_else(|| {
+                probed
+                    .format
+                    .tracks()
+                    .iter()
+                    .find(|t| t.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL)
+            })
+            .ok_or_else(|| anyhow::anyhow!("No supported audio track found"))?
+            .clone();
+
+        let track_id = track.id;
+
+        let mut decoder = symphonia::default::get_codecs().make(
+            &track.codec_params,
+            &symphonia::core::codecs::DecoderOptions::default(),
+        )?;
+
+        let total_duration = track
+            .codec_params
+            .time_base
+            .zip(track.codec_params.n_frames)
+            .map(|(base, frames)| base.calc_time(frames));
+
+        // Decode first packet to initialize buffer and spec
+        let packet = loop {
+            let p = probed.format.next_packet()?;
+            if p.track_id() == track_id {
+                break p;
+            }
+        };
+
+        let decoded = decoder.decode(&packet)?;
+        let spec = decoded.spec().to_owned();
+        let buffer_duration = decoded.capacity() as u64;
+        let buffer = get_buffer(decoded, &spec);
+
+        Ok(Self {
+            decoder,
+            current_frame_offset: 0,
+            format: probed.format,
+            total_duration,
+            buffer,
+            buffer_duration,
+            spec,
+        })
+    }
+
+    pub fn new_progressive(
+        file: File,
+        extension: Option<&str>,
+        download_complete: Arc<AtomicBool>,
+        total_size: Arc<AtomicU64>,
+    ) -> Result<Self> {
+        let source = ProgressiveFile::new(file, download_complete, total_size);
         let mss = symphonia::core::io::MediaSourceStream::new(Box::new(source), Default::default());
 
         let mut hint = symphonia::core::probe::Hint::new();
@@ -501,6 +668,23 @@ impl AudioPlayer {
         let file = File::open(&file_path)?;
         let ext = file_path.extension().and_then(|e| e.to_str());
         let source = SymphoniaDecoder::new(file, ext)?;
+        let total_duration = source.total_duration().unwrap_or(Duration::from_secs(0));
+        let shared = Arc::new(VisualizerShared::new());
+        let vis_source = VisualizerSource::new(source, Arc::clone(&shared));
+        let sink = Sink::try_new(&self.stream_handle)?;
+        sink.append(vis_source);
+        Ok((sink, total_duration, shared))
+    }
+
+    pub fn play_progressive(
+        &self,
+        file: File,
+        extension: Option<&str>,
+        download_complete: Arc<AtomicBool>,
+        total_size: Arc<AtomicU64>,
+    ) -> Result<(Sink, Duration, Arc<VisualizerShared>)> {
+        let source =
+            SymphoniaDecoder::new_progressive(file, extension, download_complete, total_size)?;
         let total_duration = source.total_duration().unwrap_or(Duration::from_secs(0));
         let shared = Arc::new(VisualizerShared::new());
         let vis_source = VisualizerSource::new(source, Arc::clone(&shared));

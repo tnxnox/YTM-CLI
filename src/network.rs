@@ -92,21 +92,29 @@ impl NetworkClient {
         video_id: &str,
         yt_dlp_path: &std::path::Path,
         js_runtime: &str,
+        cookies_path: Option<&std::path::Path>,
+        browser: Option<&str>,
     ) -> Result<String, anyhow::Error> {
-        let output = tokio::process::Command::new(yt_dlp_path)
-            .args(&[
-                "--no-warnings",
-                "--js-runtimes",
-                js_runtime,
-                "--remote-components",
-                "ejs:github",
-                "-g",
-                "-f",
-                "ba[ext=m4a]/ba",
-                &format!("https://www.youtube.com/watch?v={}", video_id),
-            ])
-            .output()
-            .await?;
+        let mut cmd = tokio::process::Command::new(yt_dlp_path);
+        cmd.args(&[
+            "--no-warnings",
+            "--js-runtimes",
+            js_runtime,
+            "--remote-components",
+            "ejs:github",
+            "-g",
+            "-f",
+            "ba[ext=m4a]/ba",
+            &format!("https://www.youtube.com/watch?v={}", video_id),
+        ]);
+        if let Some(b) = browser {
+            cmd.arg("--cookies-from-browser").arg(b);
+        } else if let Some(cp) = cookies_path {
+            if cp.exists() && std::fs::metadata(cp).map(|m| m.len() > 0).unwrap_or(false) {
+                cmd.arg("--cookies").arg(cp);
+            }
+        }
+        let output = cmd.output().await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -225,7 +233,9 @@ impl NetworkClient {
         {
             cmd.arg("--cookies").arg(cookies_path);
         } else {
-            return Err(anyhow::anyhow!("Not logged in (browser.txt or cookies.txt not found). Use the login feature first."));
+            return Err(anyhow::anyhow!(
+                "Not logged in (browser.txt or cookies.txt not found). Use the login feature first."
+            ));
         }
 
         cmd.arg("https://www.youtube.com/feed/playlists");
@@ -368,46 +378,38 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_search() {
+    async fn test_search_albums() {
         let client = NetworkClient::new();
-        let results = client.search_albums("utopia").await.unwrap();
-        println!("--- ALBUMS RESULTS FOR 'utopia' ---");
-        for album in results {
-            println!("- {} by {} ({:?})", album.title, album.artist, album.year);
+
+        let results = client
+            .search_albums("Random Access Memories")
+            .await
+            .unwrap();
+        println!("--- ALBUM RESULTS FOR 'Random Access Memories' ---");
+        for album in &results {
+            println!(
+                "- {} by {:?} ({:?}) id: {}",
+                album.title, album.artist, album.year, album.id
+            );
         }
+        assert!(results.iter().any(
+            |a| a.title.to_lowercase().contains("random access memories")
+                && a.artist.to_lowercase().contains("daft punk")
+        ));
 
-        let results_ts = client.search_albums("travis scott").await.unwrap();
-        println!("--- ALBUMS RESULTS FOR 'travis scott' ---");
-        for album in results_ts {
-            println!("- {} by {} ({:?})", album.title, album.artist, album.year);
+        let results_dsotm = client.search_albums("Dark Side of the Moon").await.unwrap();
+        println!("--- ALBUM RESULTS FOR 'Dark Side of the Moon' ---");
+        for album in &results_dsotm {
+            println!(
+                "- {} by {:?} ({:?}) id: {}",
+                album.title, album.artist, album.year, album.id
+            );
         }
-
-
-        let main_results_utopia = client.client.query().music_search_main("utopia").await.unwrap();
-
-        println!("--- MAIN RESULTS FOR 'utopia' ---");
-        for item in main_results_utopia.items.items {
-            match item {
-                rustypipe::model::MusicItem::Track(t) => println!("Track: {} by {:?}", t.name, t.artists),
-                rustypipe::model::MusicItem::Album(a) => println!("Album: {} by {:?}", a.name, a.artists),
-                rustypipe::model::MusicItem::Artist(art) => println!("Artist: {}", art.name),
-                rustypipe::model::MusicItem::Playlist(p) => println!("Playlist: {}", p.name),
-                rustypipe::model::MusicItem::User(u) => println!("User: {}", u.name),
-            }
-        }
-
-        let main_results_ts = client.client.query().music_search_main("travis scott utopia").await.unwrap();
-        println!("--- MAIN RESULTS FOR 'travis scott utopia' ---");
-        for item in main_results_ts.items.items {
-            match item {
-                rustypipe::model::MusicItem::Track(t) => println!("Track: {} by {:?}", t.name, t.artists),
-                rustypipe::model::MusicItem::Album(a) => println!("Album: {} by {:?}", a.name, a.artists),
-                rustypipe::model::MusicItem::Artist(art) => println!("Artist: {}", art.name),
-                rustypipe::model::MusicItem::Playlist(p) => println!("Playlist: {}", p.name),
-                rustypipe::model::MusicItem::User(u) => println!("User: {}", u.name),
-            }
-        }
+        assert!(
+            results_dsotm
+                .iter()
+                .any(|a| a.title.to_lowercase().contains("dark side of the moon")
+                    && a.artist.to_lowercase().contains("pink floyd"))
+        );
     }
 }
-
-

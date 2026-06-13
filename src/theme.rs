@@ -1,4 +1,4 @@
-use comfy_table::{modifiers, presets, Attribute, Color, Table};
+use comfy_table::{Attribute, Color, Table, modifiers, presets};
 use dialoguer::console::Style as DialoguerStyle;
 use dialoguer::theme::ColorfulTheme;
 use owo_colors::{OwoColorize, Rgb, Style};

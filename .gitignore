@@ -8,5 +8,14 @@ rustypipe_reports/
 *.opus
 *.ogg
 *.ogg.ogg
+*.flac
+*.sqlite
+*.db
+*.log
 test
 /base.js
+/cookies.txt
+/browser.txt
+.vscode/
+.idea/
+.env
