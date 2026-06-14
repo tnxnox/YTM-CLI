@@ -747,18 +747,10 @@ async fn play_track(
     // Scope for raw mode guard
     {
         let _guard = RawModeGuard::new()?;
-        let mut last_tick = Instant::now();
-        let mut elapsed = Duration::from_secs(0);
         let mut last_seek = Instant::now() - Duration::from_secs(1);
 
         while !sink.empty() {
-            let now = Instant::now();
-            let delta = now.duration_since(last_tick);
-            last_tick = now;
-
-            if !sink.is_paused() {
-                elapsed += delta;
-            }
+            let elapsed = Duration::from_millis(visualizer_shared.get_elapsed_ms());
 
             draw_progress_bar(
                 elapsed,
@@ -807,7 +799,8 @@ async fn play_track(
                                     let new_pos = elapsed.saturating_sub(Duration::from_secs(5));
                                     match sink.try_seek(new_pos) {
                                         Ok(_) => {
-                                            elapsed = new_pos;
+                                            visualizer_shared
+                                                .set_elapsed_ms(new_pos.as_millis() as u64);
                                             last_seek = now_seek;
                                         }
                                         Err(e) => {
@@ -829,7 +822,8 @@ async fn play_track(
                                     if can_seek {
                                         match sink.try_seek(new_pos) {
                                             Ok(_) => {
-                                                elapsed = new_pos;
+                                                visualizer_shared
+                                                    .set_elapsed_ms(new_pos.as_millis() as u64);
                                                 last_seek = now_seek;
                                             }
                                             Err(e) => {

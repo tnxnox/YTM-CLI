@@ -14,6 +14,7 @@ use std::time::Duration;
 pub struct VisualizerShared {
     // 8 frequency bands storing f32 values via bits as AtomicU32
     pub bands: [AtomicU32; 8],
+    pub elapsed_ms: AtomicU64,
 }
 
 impl VisualizerShared {
@@ -29,6 +30,7 @@ impl VisualizerShared {
                 AtomicU32::new(0),
                 AtomicU32::new(0),
             ],
+            elapsed_ms: AtomicU64::new(0),
         }
     }
 
@@ -44,6 +46,14 @@ impl VisualizerShared {
         if idx < 8 {
             self.bands[idx].store(val.to_bits(), Ordering::Relaxed);
         }
+    }
+
+    pub fn get_elapsed_ms(&self) -> u64 {
+        self.elapsed_ms.load(Ordering::Relaxed)
+    }
+
+    pub fn set_elapsed_ms(&self, val: u64) {
+        self.elapsed_ms.store(val, Ordering::Relaxed);
     }
 }
 
@@ -86,6 +96,8 @@ pub struct VisualizerSource<S> {
     lp_states: [f32; 7],
     envs: [f32; 8],
     sample_count: usize,
+    samples_played: u64,
+    base_ms: u64,
 }
 
 impl<S> VisualizerSource<S> {
@@ -96,6 +108,8 @@ impl<S> VisualizerSource<S> {
             lp_states: [0.0; 7],
             envs: [0.0; 8],
             sample_count: 0,
+            samples_played: 0,
+            base_ms: 0,
         }
     }
 }
@@ -151,12 +165,21 @@ where
                 *env = *env + alpha * (abs_b - *env);
             }
 
+            self.samples_played += 1;
             self.sample_count += 1;
             if self.sample_count >= 512 {
                 for i in 0..8 {
                     self.shared.set_band(i, self.envs[i]);
                 }
                 self.sample_count = 0;
+
+                let channels = self.inner.channels() as u64;
+                let sample_rate = self.inner.sample_rate() as u64;
+                if channels > 0 && sample_rate > 0 {
+                    let elapsed_ms =
+                        self.base_ms + (self.samples_played * 1000) / (channels * sample_rate);
+                    self.shared.set_elapsed_ms(elapsed_ms);
+                }
             }
 
             Some(sample)
@@ -193,7 +216,11 @@ where
 
     #[inline]
     fn try_seek(&mut self, pos: Duration) -> std::result::Result<(), rodio::source::SeekError> {
-        self.inner.try_seek(pos)
+        self.inner.try_seek(pos)?;
+        self.base_ms = pos.as_millis() as u64;
+        self.samples_played = 0;
+        self.shared.set_elapsed_ms(self.base_ms);
+        Ok(())
     }
 }
 
