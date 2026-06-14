@@ -314,12 +314,17 @@ impl Seek for ProgressiveFile {
 
 impl symphonia::core::io::MediaSource for ProgressiveFile {
     fn is_seekable(&self) -> bool {
-        true
+        self.download_complete.load(Ordering::SeqCst)
     }
 
     fn byte_len(&self) -> Option<u64> {
-        let size = self.total_size.load(Ordering::SeqCst);
-        if size > 0 { Some(size) } else { None }
+        if self.download_complete.load(Ordering::SeqCst) {
+            let size = self.total_size.load(Ordering::SeqCst);
+            if size > 0 {
+                return Some(size);
+            }
+        }
+        None
     }
 }
 
