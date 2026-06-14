@@ -187,7 +187,9 @@ async fn fetch_playlist_with_retry(
                     _ => {}
                 }
             } else {
-                println!("  ❌ Session expired, and no browser is configured. Please login using the login feature.");
+                println!(
+                    "  ❌ Session expired, and no browser is configured. Please login using the login feature."
+                );
                 press_enter_to_continue();
             }
         }
@@ -1737,8 +1739,7 @@ async fn run_search_albums_and_play(
                 selected_album.id
             );
 
-            match fetch_playlist_with_retry(config, client, &album_url).await
-            {
+            match fetch_playlist_with_retry(config, client, &album_url).await {
                 Ok(tracks) => {
                     if tracks.is_empty() {
                         println!("  ❌ {}", theme::style_error("This album has no tracks."));
@@ -2013,8 +2014,7 @@ async fn run_playlist_playback(
     };
 
     println!("\n  Fetching playlist tracks...");
-    let tracks = match fetch_playlist_with_retry(config, client, &url).await
-    {
+    let tracks = match fetch_playlist_with_retry(config, client, &url).await {
         Ok(t) => t,
         Err(e) => {
             println!("  ❌ Failed to fetch playlist tracks: {}", e);

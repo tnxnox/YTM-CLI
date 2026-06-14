@@ -123,8 +123,10 @@ impl NetworkClient {
     }
 
     pub async fn reset_cookies(&self) {
-        self.cookies_loaded.store(false, std::sync::atomic::Ordering::SeqCst);
-        self.cookies_expired.store(false, std::sync::atomic::Ordering::SeqCst);
+        self.cookies_loaded
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        self.cookies_expired
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         let _ = self.client.user_auth_remove_cookie().await;
     }
 
@@ -134,7 +136,10 @@ impl NetworkClient {
         browser: Option<&str>,
         cookies_path: &std::path::Path,
     ) -> Result<(), anyhow::Error> {
-        if self.cookies_loaded.load(std::sync::atomic::Ordering::SeqCst) {
+        if self
+            .cookies_loaded
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
             return Ok(());
         }
 
@@ -161,7 +166,12 @@ impl NetworkClient {
                     .unwrap_or(false)
             {
                 if let Ok(cookie_content) = std::fs::read_to_string(&temp_cookies) {
-                    if self.client.user_auth_set_cookie_txt(&cookie_content).await.is_ok() {
+                    if self
+                        .client
+                        .user_auth_set_cookie_txt(&cookie_content)
+                        .await
+                        .is_ok()
+                    {
                         success = true;
                     }
                 }
@@ -174,19 +184,27 @@ impl NetworkClient {
         {
             has_cookies_configured = true;
             if let Ok(cookie_content) = std::fs::read_to_string(cookies_path) {
-                if self.client.user_auth_set_cookie_txt(&cookie_content).await.is_ok() {
+                if self
+                    .client
+                    .user_auth_set_cookie_txt(&cookie_content)
+                    .await
+                    .is_ok()
+                {
                     success = true;
                 }
             }
         }
 
         if has_cookies_configured && !success {
-            self.cookies_expired.store(true, std::sync::atomic::Ordering::SeqCst);
+            self.cookies_expired
+                .store(true, std::sync::atomic::Ordering::SeqCst);
         } else {
-            self.cookies_expired.store(false, std::sync::atomic::Ordering::SeqCst);
+            self.cookies_expired
+                .store(false, std::sync::atomic::Ordering::SeqCst);
         }
 
-        self.cookies_loaded.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.cookies_loaded
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
 
@@ -281,7 +299,10 @@ impl NetworkClient {
         match res {
             Ok(tracks) => Ok(tracks),
             Err(e) => {
-                if self.cookies_expired.load(std::sync::atomic::Ordering::SeqCst) {
+                if self
+                    .cookies_expired
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                {
                     Err(anyhow::anyhow!("SESSION_EXPIRED"))
                 } else {
                     Err(e)
