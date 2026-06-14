@@ -134,6 +134,68 @@ fn press_enter_to_continue() {
     std::io::stdin().read_line(&mut input).ok();
 }
 
+async fn fetch_playlist_with_retry(
+    config: &Config,
+    client: &NetworkClient,
+    playlist_url: &str,
+) -> Result<Vec<TrackInfo>, anyhow::Error> {
+    let yt_dlp_path = config.ensure_yt_dlp().await?;
+    let browser = config.get_browser();
+    let js_runtime = config.get_js_runtime_arg();
+
+    let first_try = client
+        .fetch_playlist(
+            &yt_dlp_path,
+            browser.as_deref(),
+            &config.cookies_path,
+            &js_runtime,
+            playlist_url,
+        )
+        .await;
+
+    if let Err(ref e) = first_try {
+        if e.to_string().contains("SESSION_EXPIRED") {
+            if let Some(b) = browser {
+                let confirm = dialoguer::Confirm::with_theme(&theme::get_dialoguer_theme())
+                    .with_prompt(format!(
+                        "Your YouTube session has expired. Refresh cookies from {}?",
+                        theme::style_primary(&b)
+                    ))
+                    .default(true)
+                    .interact();
+
+                match confirm {
+                    Ok(true) => {
+                        println!("  🔑 Refreshing cookies...");
+                        if let Err(err) = config.login(&b).await {
+                            println!("  ❌ Failed to refresh cookies: {}", err);
+                            press_enter_to_continue();
+                        } else {
+                            client.reset_cookies().await;
+                            println!("  🔄 Retrying playlist fetch...");
+                            return client
+                                .fetch_playlist(
+                                    &yt_dlp_path,
+                                    Some(&b),
+                                    &config.cookies_path,
+                                    &js_runtime,
+                                    playlist_url,
+                                )
+                                .await;
+                        }
+                    }
+                    _ => {}
+                }
+            } else {
+                println!("  ❌ Session expired, and no browser is configured. Please login using the login feature.");
+                press_enter_to_continue();
+            }
+        }
+    }
+
+    first_try
+}
+
 fn format_duration(d: Duration) -> String {
     let secs = d.as_secs();
     let mins = secs / 60;
@@ -835,12 +897,12 @@ async fn play_track(
                                 }
                             }
                             KeyCode::Up => {
-                                let vol = (sink.volume() + 0.1).min(2.0);
+                                let vol = (sink.volume() + 0.01).min(2.0);
                                 sink.set_volume(vol);
                                 *current_volume = vol;
                             }
                             KeyCode::Down => {
-                                let vol = (sink.volume() - 0.1).max(0.0);
+                                let vol = (sink.volume() - 0.01).max(0.0);
                                 sink.set_volume(vol);
                                 *current_volume = vol;
                             }
@@ -1670,22 +1732,12 @@ async fn run_search_albums_and_play(
                 theme::style_primary(&selected_album.title)
             );
 
-            let yt_dlp_path = config.ensure_yt_dlp().await?;
-            let browser = config.get_browser();
             let album_url = format!(
                 "https://music.youtube.com/playlist?list={}",
                 selected_album.id
             );
 
-            match client
-                .fetch_playlist(
-                    &yt_dlp_path,
-                    browser.as_deref(),
-                    &config.cookies_path,
-                    &config.get_js_runtime_arg(),
-                    &album_url,
-                )
-                .await
+            match fetch_playlist_with_retry(config, client, &album_url).await
             {
                 Ok(tracks) => {
                     if tracks.is_empty() {
@@ -1950,8 +2002,6 @@ async fn run_playlist_playback(
     current_volume: &mut f32,
     debug: bool,
 ) -> Result<()> {
-    let yt_dlp_path = config.ensure_yt_dlp().await?;
-
     let url = if playlist_id == "LM" {
         "https://music.youtube.com/playlist?list=LM".to_string()
     } else if playlist_id.starts_with("PL") || playlist_id.starts_with("RD") {
@@ -1963,16 +2013,7 @@ async fn run_playlist_playback(
     };
 
     println!("\n  Fetching playlist tracks...");
-    let browser = config.get_browser();
-    let tracks = match client
-        .fetch_playlist(
-            &yt_dlp_path,
-            browser.as_deref(),
-            &config.cookies_path,
-            &config.get_js_runtime_arg(),
-            &url,
-        )
-        .await
+    let tracks = match fetch_playlist_with_retry(config, client, &url).await
     {
         Ok(t) => t,
         Err(e) => {
@@ -2397,21 +2438,11 @@ async fn main() -> Result<()> {
             }
             let selected_album = &albums[0];
             println!("Loading tracks for album '{}'...", selected_album.title);
-            let yt_dlp_path = config.ensure_yt_dlp().await?;
-            let browser = config.get_browser();
             let album_url = format!(
                 "https://music.youtube.com/playlist?list={}",
                 selected_album.id
             );
-            let tracks = client
-                .fetch_playlist(
-                    &yt_dlp_path,
-                    browser.as_deref(),
-                    &config.cookies_path,
-                    &config.get_js_runtime_arg(),
-                    &album_url,
-                )
-                .await?;
+            let tracks = fetch_playlist_with_retry(&config, &client, &album_url).await?;
             if tracks.is_empty() {
                 println!("This album has no tracks.");
                 return Ok(());
@@ -2511,18 +2542,8 @@ async fn main() -> Result<()> {
             println!("Logged out successfully.");
         }
         Some(Commands::Playlist { url, shuffle }) => {
-            let yt_dlp_path = config.ensure_yt_dlp().await?;
             println!("Fetching playlist details...");
-            let browser = config.get_browser();
-            let mut tracks = client
-                .fetch_playlist(
-                    &yt_dlp_path,
-                    browser.as_deref(),
-                    &config.cookies_path,
-                    &config.get_js_runtime_arg(),
-                    &url,
-                )
-                .await?;
+            let mut tracks = fetch_playlist_with_retry(&config, &client, &url).await?;
             if tracks.is_empty() {
                 println!("No tracks found in playlist.");
                 return Ok(());

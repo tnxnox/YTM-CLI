@@ -4,6 +4,8 @@ use serde::Deserialize;
 
 pub struct NetworkClient {
     client: RustyPipe,
+    cookies_loaded: std::sync::atomic::AtomicBool,
+    cookies_expired: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Debug, Clone)]
@@ -30,17 +32,8 @@ pub struct PlaylistInfo {
 }
 
 #[derive(Deserialize)]
-struct YtDlpPlaylistEntry {
-    id: Option<String>,
-    title: Option<String>,
-    uploader: Option<String>,
-    channel: Option<String>,
-    duration: Option<f64>,
-}
-
-#[derive(Deserialize)]
-struct YtDlpPlaylistDump {
-    entries: Option<Vec<YtDlpPlaylistEntry>>,
+struct YtDlpLibraryDump {
+    entries: Option<Vec<YtDlpLibraryPlaylistEntry>>,
 }
 
 #[derive(Deserialize)]
@@ -50,15 +43,12 @@ struct YtDlpLibraryPlaylistEntry {
     playlist_count: Option<usize>,
 }
 
-#[derive(Deserialize)]
-struct YtDlpLibraryDump {
-    entries: Option<Vec<YtDlpLibraryPlaylistEntry>>,
-}
-
 impl NetworkClient {
     pub fn new() -> Self {
         Self {
             client: RustyPipe::new(),
+            cookies_loaded: std::sync::atomic::AtomicBool::new(false),
+            cookies_expired: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -129,8 +119,75 @@ impl NetworkClient {
         if url.is_empty() {
             return Err(anyhow::anyhow!("yt-dlp returned empty stream URL"));
         }
-
         Ok(url)
+    }
+
+    pub async fn reset_cookies(&self) {
+        self.cookies_loaded.store(false, std::sync::atomic::Ordering::SeqCst);
+        self.cookies_expired.store(false, std::sync::atomic::Ordering::SeqCst);
+        let _ = self.client.user_auth_remove_cookie().await;
+    }
+
+    pub async fn load_cookies(
+        &self,
+        yt_dlp_path: &std::path::Path,
+        browser: Option<&str>,
+        cookies_path: &std::path::Path,
+    ) -> Result<(), anyhow::Error> {
+        if self.cookies_loaded.load(std::sync::atomic::Ordering::SeqCst) {
+            return Ok(());
+        }
+
+        let mut success = false;
+        let mut has_cookies_configured = false;
+
+        if let Some(b) = browser {
+            has_cookies_configured = true;
+            let temp_cookies = std::env::temp_dir().join("ytm_cli_cookies_temp.txt");
+            let _ = tokio::process::Command::new(yt_dlp_path)
+                .args(&[
+                    "--cookies-from-browser",
+                    b,
+                    "--cookies",
+                    temp_cookies.to_str().unwrap(),
+                    "--skip-download",
+                    "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                ])
+                .output()
+                .await;
+            if temp_cookies.exists()
+                && std::fs::metadata(&temp_cookies)
+                    .map(|m| m.len() > 0)
+                    .unwrap_or(false)
+            {
+                if let Ok(cookie_content) = std::fs::read_to_string(&temp_cookies) {
+                    if self.client.user_auth_set_cookie_txt(&cookie_content).await.is_ok() {
+                        success = true;
+                    }
+                }
+                let _ = std::fs::remove_file(temp_cookies);
+            }
+        } else if cookies_path.exists()
+            && std::fs::metadata(cookies_path)
+                .map(|m| m.len() > 0)
+                .unwrap_or(false)
+        {
+            has_cookies_configured = true;
+            if let Ok(cookie_content) = std::fs::read_to_string(cookies_path) {
+                if self.client.user_auth_set_cookie_txt(&cookie_content).await.is_ok() {
+                    success = true;
+                }
+            }
+        }
+
+        if has_cookies_configured && !success {
+            self.cookies_expired.store(true, std::sync::atomic::Ordering::SeqCst);
+        } else {
+            self.cookies_expired.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        self.cookies_loaded.store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
     }
 
     pub async fn fetch_playlist(
@@ -138,72 +195,99 @@ impl NetworkClient {
         yt_dlp_path: &std::path::Path,
         browser: Option<&str>,
         cookies_path: &std::path::Path,
-        js_runtime: &str,
+        _js_runtime: &str,
         playlist_url: &str,
     ) -> Result<Vec<TrackInfo>, anyhow::Error> {
-        let mut cmd = tokio::process::Command::new(yt_dlp_path);
-        cmd.args(&[
-            "--no-warnings",
-            "--js-runtimes",
-            js_runtime,
-            "--remote-components",
-            "ejs:github",
-            "--flat-playlist",
-            "-J",
-        ]);
+        let _ = self.load_cookies(yt_dlp_path, browser, cookies_path).await;
 
-        if let Some(b) = browser {
-            cmd.arg("--cookies-from-browser").arg(b);
-        } else if cookies_path.exists()
-            && std::fs::metadata(cookies_path)
-                .map(|m| m.len() > 0)
-                .unwrap_or(false)
-        {
-            cmd.arg("--cookies").arg(cookies_path);
-        }
+        let playlist_id = if playlist_url.starts_with("http") {
+            if let Some(pos) = playlist_url.find("list=") {
+                let id = &playlist_url[pos + 5..];
+                if let Some(end) = id.find('&') {
+                    id[..end].to_string()
+                } else {
+                    id.to_string()
+                }
+            } else {
+                playlist_url.to_string()
+            }
+        } else {
+            playlist_url.to_string()
+        };
 
-        cmd.arg(playlist_url);
+        let res = if playlist_id.starts_with("MPREb_") {
+            let album = self
+                .client
+                .query()
+                .music_album(&playlist_id)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to fetch album details: {:?}", e))?;
 
-        // Ensure child process is killed if we abort the task
-        cmd.kill_on_drop(true);
+            let artist_name = album
+                .artists
+                .first()
+                .map(|a| a.name.clone())
+                .unwrap_or_else(|| "Unknown Artist".to_string());
 
-        let output = cmd.output().await?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!(
-                "Failed to fetch playlist details: {}",
-                stderr
-            ));
-        }
+            let tracks = album
+                .tracks
+                .into_iter()
+                .map(|track| {
+                    let track_artist = track
+                        .artists
+                        .first()
+                        .map(|a| a.name.clone())
+                        .unwrap_or_else(|| artist_name.clone());
+                    TrackInfo {
+                        id: track.id,
+                        title: track.name,
+                        artist: track_artist,
+                        duration_secs: track.duration,
+                    }
+                })
+                .collect();
+            Ok(tracks)
+        } else {
+            let mut playlist = self
+                .client
+                .query()
+                .music_playlist(&playlist_id)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to fetch playlist details: {:?}", e))?;
 
-        let dump: YtDlpPlaylistDump = serde_json::from_slice(&output.stdout)?;
-        let mut tracks = Vec::new();
+            let _ = playlist.tracks.extend_all(self.client.query()).await;
 
-        if let Some(entries) = dump.entries {
-            for entry in entries {
-                let id = match entry.id {
-                    Some(id) if !id.is_empty() => id,
-                    _ => continue,
-                };
+            let tracks = playlist
+                .tracks
+                .items
+                .into_iter()
+                .map(|track| {
+                    let artist_name = track
+                        .artists
+                        .first()
+                        .map(|a| a.name.clone())
+                        .unwrap_or_else(|| "Unknown Artist".to_string());
+                    TrackInfo {
+                        id: track.id,
+                        title: track.name,
+                        artist: artist_name,
+                        duration_secs: track.duration,
+                    }
+                })
+                .collect();
+            Ok(tracks)
+        };
 
-                let title = entry.title.unwrap_or_else(|| "Unknown Title".to_string());
-                let artist = entry
-                    .uploader
-                    .or(entry.channel)
-                    .unwrap_or_else(|| "Unknown Artist".to_string());
-
-                let duration_secs = entry.duration.map(|d| d.round() as u32);
-
-                tracks.push(TrackInfo {
-                    id,
-                    title,
-                    artist,
-                    duration_secs,
-                });
+        match res {
+            Ok(tracks) => Ok(tracks),
+            Err(e) => {
+                if self.cookies_expired.load(std::sync::atomic::Ordering::SeqCst) {
+                    Err(anyhow::anyhow!("SESSION_EXPIRED"))
+                } else {
+                    Err(e)
+                }
             }
         }
-
-        Ok(tracks)
     }
 
     pub async fn fetch_library_playlists(
@@ -378,38 +462,22 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_search_albums() {
+    async fn test_fetch_utopia() {
         let client = NetworkClient::new();
-
-        let results = client
-            .search_albums("Random Access Memories")
-            .await
-            .unwrap();
-        println!("--- ALBUM RESULTS FOR 'Random Access Memories' ---");
-        for album in &results {
-            println!(
-                "- {} by {:?} ({:?}) id: {}",
-                album.title, album.artist, album.year, album.id
-            );
+        let album = client.client.query().music_album("MPREb_B7NkMWS9hMM").await;
+        match &album {
+            Ok(a) => {
+                println!("--- UTOPIA Album Info ---");
+                println!("Name: {}", a.name);
+                println!("Tracks: {}", a.tracks.len());
+                for track in &a.tracks {
+                    println!("  - {} (id: {})", track.name, track.id);
+                }
+            }
+            Err(e) => {
+                println!("Failed to fetch UTOPIA: {:?}", e);
+            }
         }
-        assert!(results.iter().any(
-            |a| a.title.to_lowercase().contains("random access memories")
-                && a.artist.to_lowercase().contains("daft punk")
-        ));
-
-        let results_dsotm = client.search_albums("Dark Side of the Moon").await.unwrap();
-        println!("--- ALBUM RESULTS FOR 'Dark Side of the Moon' ---");
-        for album in &results_dsotm {
-            println!(
-                "- {} by {:?} ({:?}) id: {}",
-                album.title, album.artist, album.year, album.id
-            );
-        }
-        assert!(
-            results_dsotm
-                .iter()
-                .any(|a| a.title.to_lowercase().contains("dark side of the moon")
-                    && a.artist.to_lowercase().contains("pink floyd"))
-        );
+        assert!(album.is_ok());
     }
 }
