@@ -162,7 +162,8 @@ fn draw_progress_bar(
         None => "??:??".to_string(),
     };
 
-    let bar_width = 30;
+    let term_width = crossterm::terminal::size().map(|(w, _)| w).unwrap_or(80) as usize;
+    let bar_width = term_width.saturating_sub(44).clamp(30, 80);
     let mut filled = 0;
     if let Some(t) = total {
         if t.as_secs() > 0 {
