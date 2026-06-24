@@ -678,79 +678,57 @@ async fn play_track(
             None
         };
 
-        let client = NetworkClient::new();
         let yt_dlp_path = config.ensure_yt_dlp().await?;
         let js_runtime = config.get_js_runtime_arg();
         let cookies_path = Some(config.cookies_path.as_path());
         let browser = config.get_browser();
 
-        // Extract the direct stream URL
-        let stream_url = match client
-            .get_stream_url(
-                video_id,
-                &yt_dlp_path,
-                &js_runtime,
-                cookies_path,
-                browser.as_deref(),
-            )
-            .await
-        {
-            Ok(url) => url,
+        let download_complete = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let download_complete_clone = Arc::clone(&download_complete);
+        let total_size = Arc::new(std::sync::atomic::AtomicU64::new(0));
+
+        // Spawn a background task to download the stream using yt-dlp
+        let mut cmd = tokio::process::Command::new(&yt_dlp_path);
+        cmd.args([
+            "--no-warnings",
+            "--js-runtimes",
+            &js_runtime,
+            "--remote-components",
+            "ejs:github",
+            "--no-part",
+            "-f",
+            "ba[ext=m4a]/ba",
+            &format!("https://www.youtube.com/watch?v={}", video_id),
+            "-o",
+            &cache_file.to_string_lossy(),
+        ]);
+        if let Some(ref b) = browser {
+            cmd.arg("--cookies-from-browser").arg(b);
+        } else if let Some(cp) = cookies_path {
+            if cp.exists() && std::fs::metadata(cp).map(|m| m.len() > 0).unwrap_or(false) {
+                cmd.arg("--cookies").arg(cp);
+            }
+        }
+        cmd.kill_on_drop(true);
+
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
             Err(e) => {
                 if let Some(ref spinner) = pb {
                     spinner.finish_and_clear();
                 }
                 println!(
-                    "  ❌ Failed to get stream URL: {}",
+                    "  ❌ Failed to spawn yt-dlp download: {}",
                     theme::style_error(&e.to_string())
                 );
                 press_enter_to_continue();
-                return Err(e);
+                return Err(e.into());
             }
         };
 
-        // Create references for background task
-        let cache_file_clone = cache_file.clone();
-        let stream_url_clone = stream_url.clone();
-        let download_complete = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let download_complete_clone = Arc::clone(&download_complete);
-        let total_size = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let total_size_clone = Arc::clone(&total_size);
-
-        // Spawn a background task to download the stream using reqwest
         let download_handle = tokio::spawn(async move {
-            let req_client = reqwest::Client::new();
-            let mut response = match req_client.get(&stream_url_clone).send().await {
-                Ok(res) => res,
-                Err(e) => {
-                    log::error!("Progressive download failed to send request: {}", e);
-                    download_complete_clone.store(true, std::sync::atomic::Ordering::SeqCst);
-                    return;
-                }
-            };
-
-            // Read Content-Length
-            if let Some(content_len) = response.content_length() {
-                total_size_clone.store(content_len, std::sync::atomic::Ordering::SeqCst);
-            }
-
-            let mut file = match std::fs::File::create(&cache_file_clone) {
-                Ok(f) => f,
-                Err(e) => {
-                    log::error!("Progressive download failed to create file: {}", e);
-                    download_complete_clone.store(true, std::sync::atomic::Ordering::SeqCst);
-                    return;
-                }
-            };
-
-            // Buffer stream bytes
-            while let Ok(Some(chunk)) = response.chunk().await {
-                use std::io::Write;
-                if let Err(e) = file.write_all(&chunk) {
-                    log::error!("Progressive download failed to write to file: {}", e);
-                    break;
-                }
-            }
+            let status = child.wait().await;
+            log::info!("Progressive download yt-dlp child status: {:?}", status);
             download_complete_clone.store(true, std::sync::atomic::Ordering::SeqCst);
         });
 
@@ -777,6 +755,17 @@ async fn play_track(
 
         if let Some(ref spinner) = pb {
             spinner.finish_and_clear();
+        }
+
+        // Verify that the file was created and contains data
+        let file_ok = cache_file.exists()
+            && std::fs::metadata(&cache_file)
+                .map(|m| m.len() > 1024)
+                .unwrap_or(false);
+        if !file_ok {
+            return Err(anyhow::anyhow!(
+                "Progressive download failed to initialize stream (empty or missing file)"
+            ));
         }
 
         // Open the file for progressive playback
