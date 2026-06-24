@@ -459,6 +459,33 @@ fn shuffle_tracks(tracks: &mut [TrackInfo]) {
     }
 }
 
+fn get_user_agent_for_gvs_url(stream_url: &str) -> &'static str {
+    let val = if let Some(pos) = stream_url.find("?c=") {
+        &stream_url[pos + 3..]
+    } else if let Some(pos) = stream_url.find("&c=") {
+        &stream_url[pos + 3..]
+    } else {
+        ""
+    };
+
+    let client = if let Some(end_pos) = val.find('&') {
+        &val[..end_pos]
+    } else {
+        val
+    };
+
+    let client_upper = client.to_uppercase();
+    if client_upper.contains("TV") {
+        "Mozilla/5.0 (Chromecast; GoogleTV) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.127 Safari/537.36"
+    } else if client_upper.contains("ANDROID") {
+        "com.google.android.youtube/19.17.34 (Linux; U; Android 14; US) GMT+00:00"
+    } else if client_upper.contains("IOS") {
+        "com.google.ios.youtube/19.17.34 (iPhone16,2; U; CPU iPhone OS 17_5 like Mac OS X; US)"
+    } else {
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Core playback – reused by both subcommands and interactive menu
 // ---------------------------------------------------------------------------
@@ -678,57 +705,88 @@ async fn play_track(
             None
         };
 
+        let client = NetworkClient::new();
         let yt_dlp_path = config.ensure_yt_dlp().await?;
         let js_runtime = config.get_js_runtime_arg();
         let cookies_path = Some(config.cookies_path.as_path());
         let browser = config.get_browser();
 
-        let download_complete = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let download_complete_clone = Arc::clone(&download_complete);
-        let total_size = Arc::new(std::sync::atomic::AtomicU64::new(0));
-
-        // Spawn a background task to download the stream using yt-dlp
-        let mut cmd = tokio::process::Command::new(&yt_dlp_path);
-        cmd.args([
-            "--no-warnings",
-            "--js-runtimes",
-            &js_runtime,
-            "--remote-components",
-            "ejs:github",
-            "--no-part",
-            "-f",
-            "ba[ext=m4a]/ba",
-            &format!("https://www.youtube.com/watch?v={}", video_id),
-            "-o",
-            &cache_file.to_string_lossy(),
-        ]);
-        if let Some(ref b) = browser {
-            cmd.arg("--cookies-from-browser").arg(b);
-        } else if let Some(cp) = cookies_path {
-            if cp.exists() && std::fs::metadata(cp).map(|m| m.len() > 0).unwrap_or(false) {
-                cmd.arg("--cookies").arg(cp);
-            }
-        }
-        cmd.kill_on_drop(true);
-
-        let mut child = match cmd.spawn() {
-            Ok(c) => c,
+        // Extract the direct stream URL
+        let stream_url = match client
+            .get_stream_url(
+                video_id,
+                &yt_dlp_path,
+                &js_runtime,
+                cookies_path,
+                browser.as_deref(),
+            )
+            .await
+        {
+            Ok(url) => url,
             Err(e) => {
                 if let Some(ref spinner) = pb {
                     spinner.finish_and_clear();
                 }
                 println!(
-                    "  ❌ Failed to spawn yt-dlp download: {}",
+                    "  ❌ Failed to get stream URL: {}",
                     theme::style_error(&e.to_string())
                 );
                 press_enter_to_continue();
-                return Err(e.into());
+                return Err(e);
             }
         };
 
+        // Create references for background task
+        let cache_file_clone = cache_file.clone();
+        let stream_url_clone = stream_url.clone();
+        let download_complete = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let download_complete_clone = Arc::clone(&download_complete);
+        let total_size = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let total_size_clone = Arc::clone(&total_size);
+
+        // Spawn a background task to download the stream using reqwest
         let download_handle = tokio::spawn(async move {
-            let status = child.wait().await;
-            log::info!("Progressive download yt-dlp child status: {:?}", status);
+            let ua = get_user_agent_for_gvs_url(&stream_url_clone);
+            let req_client = match reqwest::Client::builder().user_agent(ua).build() {
+                Ok(c) => c,
+                Err(e) => {
+                    log::error!("Progressive download failed to build reqwest client: {}", e);
+                    download_complete_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+                    return;
+                }
+            };
+
+            let mut response = match req_client.get(&stream_url_clone).send().await {
+                Ok(res) => res,
+                Err(e) => {
+                    log::error!("Progressive download failed to send request: {}", e);
+                    download_complete_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+                    return;
+                }
+            };
+
+            // Read Content-Length
+            if let Some(content_len) = response.content_length() {
+                total_size_clone.store(content_len, std::sync::atomic::Ordering::SeqCst);
+            }
+
+            let mut file = match std::fs::File::create(&cache_file_clone) {
+                Ok(f) => f,
+                Err(e) => {
+                    log::error!("Progressive download failed to create file: {}", e);
+                    download_complete_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+                    return;
+                }
+            };
+
+            // Buffer stream bytes
+            while let Ok(Some(chunk)) = response.chunk().await {
+                use std::io::Write;
+                if let Err(e) = file.write_all(&chunk) {
+                    log::error!("Progressive download failed to write to file: {}", e);
+                    break;
+                }
+            }
             download_complete_clone.store(true, std::sync::atomic::Ordering::SeqCst);
         });
 
@@ -949,48 +1007,82 @@ fn spawn_prefetch(track: TrackInfo, config: Config, db: Db) -> tokio::task::Join
 
         let cache_file = m4a_file;
 
-        // Run yt-dlp to download in background
         if let Ok(yt_dlp_path) = config.ensure_yt_dlp().await {
-            let mut cmd = tokio::process::Command::new(&yt_dlp_path);
-            cmd.args([
-                "--no-warnings",
-                "--js-runtimes",
-                &config.get_js_runtime_arg(),
-                "--remote-components",
-                "ejs:github",
-                "-f",
-                "ba[ext=m4a]/ba",
-                &format!("https://www.youtube.com/watch?v={}", video_id),
-                "-o",
-                &cache_file.to_string_lossy(),
-            ]);
+            let client = NetworkClient::new();
+            let js_runtime = config.get_js_runtime_arg();
+            let cookies_path = Some(config.cookies_path.as_path());
             let browser = config.get_browser();
-            if let Some(ref b) = browser {
-                cmd.arg("--cookies-from-browser").arg(b);
-            } else if config.cookies_path.exists()
-                && std::fs::metadata(&config.cookies_path)
-                    .map(|m| m.len() > 0)
-                    .unwrap_or(false)
-            {
-                cmd.arg("--cookies").arg(&config.cookies_path);
-            }
-            cmd.kill_on_drop(true);
 
-            if let Ok(output) = cmd.output().await {
-                if output.status.success() {
-                    let duration_u32 = track.duration_secs.unwrap_or(0);
-                    let file_path_str = cache_file.to_string_lossy().to_string();
-                    let _ = db.insert_cached_track(
-                        video_id,
-                        &track.title,
-                        &track.artist,
-                        duration_u32,
-                        &file_path_str,
-                    );
-                    let max_bytes = db.get_max_cache_size_bytes();
-                    let _ = db.enforce_cache_limit(&config.cache_dir, max_bytes);
+            // Extract the stream URL
+            let stream_url = match client
+                .get_stream_url(
+                    video_id,
+                    &yt_dlp_path,
+                    &js_runtime,
+                    cookies_path,
+                    browser.as_deref(),
+                )
+                .await
+            {
+                Ok(url) => url,
+                Err(e) => {
+                    log::error!("Prefetch failed to get stream URL: {}", e);
+                    return;
+                }
+            };
+
+            let ua = get_user_agent_for_gvs_url(&stream_url);
+            let req_client = match reqwest::Client::builder().user_agent(ua).build() {
+                Ok(c) => c,
+                Err(e) => {
+                    log::error!("Prefetch failed to build reqwest client: {}", e);
+                    return;
+                }
+            };
+
+            let mut response = match req_client.get(&stream_url).send().await {
+                Ok(res) => res,
+                Err(e) => {
+                    log::error!("Prefetch failed to send request: {}", e);
+                    return;
+                }
+            };
+
+            if !response.status().is_success() {
+                log::error!(
+                    "Prefetch download returned error status: {}",
+                    response.status()
+                );
+                return;
+            }
+
+            let mut file = match std::fs::File::create(&cache_file) {
+                Ok(f) => f,
+                Err(e) => {
+                    log::error!("Prefetch failed to create file: {}", e);
+                    return;
+                }
+            };
+
+            while let Ok(Some(chunk)) = response.chunk().await {
+                use std::io::Write;
+                if let Err(e) = file.write_all(&chunk) {
+                    log::error!("Prefetch failed to write to file: {}", e);
+                    return;
                 }
             }
+
+            let duration_u32 = track.duration_secs.unwrap_or(0);
+            let file_path_str = cache_file.to_string_lossy().to_string();
+            let _ = db.insert_cached_track(
+                video_id,
+                &track.title,
+                &track.artist,
+                duration_u32,
+                &file_path_str,
+            );
+            let max_bytes = db.get_max_cache_size_bytes();
+            let _ = db.enforce_cache_limit(&config.cache_dir, max_bytes);
         }
     })
 }

@@ -85,6 +85,30 @@ impl NetworkClient {
         cookies_path: Option<&std::path::Path>,
         browser: Option<&str>,
     ) -> Result<String, anyhow::Error> {
+        // 1. Try extracting WITHOUT cookies first
+        let mut cmd = tokio::process::Command::new(yt_dlp_path);
+        cmd.args(&[
+            "--no-warnings",
+            "--js-runtimes",
+            js_runtime,
+            "--remote-components",
+            "ejs:github",
+            "-g",
+            "-f",
+            "ba[ext=m4a]/ba",
+            &format!("https://www.youtube.com/watch?v={}", video_id),
+        ]);
+
+        let output = cmd.output().await?;
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let url = stdout.trim().to_string();
+            if !url.is_empty() {
+                return Ok(url);
+            }
+        }
+
+        // 2. If it fails, retry WITH cookies
         let mut cmd = tokio::process::Command::new(yt_dlp_path);
         cmd.args(&[
             "--no-warnings",
@@ -104,8 +128,8 @@ impl NetworkClient {
                 cmd.arg("--cookies").arg(cp);
             }
         }
-        let output = cmd.output().await?;
 
+        let output = cmd.output().await?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(anyhow::anyhow!(
