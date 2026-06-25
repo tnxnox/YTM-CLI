@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::audio::AudioPlayer;
+use crate::audio::{AudioPlayer, VisualizerShared};
 use crate::config::Config;
 use crate::db::Db;
 use crate::network::{AlbumInfo, NetworkClient, TrackInfo};
@@ -486,6 +486,234 @@ fn get_user_agent_for_gvs_url(stream_url: &str) -> &'static str {
     }
 }
 
+async fn play_progressive_track(
+    video_id: &str,
+    title: &str,
+    artist: &str,
+    config: &Config,
+    queue_info: Option<(usize, usize)>,
+    player: &AudioPlayer,
+    current_volume: &f32,
+    debug: bool,
+    cache_file: &std::path::PathBuf,
+) -> Result<(
+    rodio::Sink,
+    Arc<VisualizerShared>,
+    Option<(
+        tokio::task::JoinHandle<()>,
+        std::path::PathBuf,
+        Arc<std::sync::atomic::AtomicBool>,
+    )>,
+)> {
+    // Remove any partial/corrupted cache file on disk
+    if cache_file.exists() {
+        std::fs::remove_file(cache_file).ok();
+    }
+
+    let track_name = format!("{} - {}", title, artist);
+    let pb = if !debug {
+        let prefix = if let Some((idx, total)) = queue_info {
+            format!("⏳ [{}/{}]", idx + 1, total)
+        } else {
+            "⏳".to_string()
+        };
+        let spinner = indicatif::ProgressBar::new_spinner();
+        spinner.set_style(
+            indicatif::ProgressStyle::default_spinner()
+                .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
+                .template(&format!("  {} {{spinner}} Buffering: {{msg}}", prefix))
+                .unwrap_or_else(|_| indicatif::ProgressStyle::default_spinner()),
+        );
+        spinner.set_message(theme::style_primary(&track_name).to_string());
+        spinner.enable_steady_tick(Duration::from_millis(80));
+        Some(spinner)
+    } else {
+        if let Some((idx, total)) = queue_info {
+            println!(
+                "  ⏳ [{}/{}] Buffering: {}",
+                idx + 1,
+                total,
+                theme::style_primary(&track_name)
+            );
+        } else {
+            println!("  ⏳ Buffering: {}", theme::style_primary(&track_name));
+        }
+        None
+    };
+
+    let client = NetworkClient::new();
+    let yt_dlp_path = config.ensure_yt_dlp().await?;
+    let js_runtime = config.get_js_runtime_arg();
+    let cookies_path = Some(config.cookies_path.as_path());
+    let browser = config.get_browser();
+
+    // Extract the direct stream URL
+    let stream_url = match client
+        .get_stream_url(
+            video_id,
+            &yt_dlp_path,
+            &js_runtime,
+            cookies_path,
+            browser.as_deref(),
+        )
+        .await
+    {
+        Ok(url) => url,
+        Err(e) => {
+            if let Some(ref spinner) = pb {
+                spinner.finish_and_clear();
+            }
+            println!(
+                "  ❌ Failed to get stream URL: {}",
+                theme::style_error(&e.to_string())
+            );
+            press_enter_to_continue();
+            return Err(e);
+        }
+    };
+
+    // Create references for background task
+    let cache_file_clone = cache_file.clone();
+    let stream_url_clone = stream_url.clone();
+    let download_complete = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let download_complete_clone = Arc::clone(&download_complete);
+    let download_active = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let download_active_clone = Arc::clone(&download_active);
+    let total_size = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let total_size_clone = Arc::clone(&total_size);
+
+    // Spawn a background task to download the stream using reqwest
+    let download_handle = tokio::spawn(async move {
+        let mut success = false;
+
+        let res = async {
+            let ua = get_user_agent_for_gvs_url(&stream_url_clone);
+            let req_client = reqwest::Client::builder()
+                .user_agent(ua)
+                .build()
+                .map_err(|e| {
+                    log::error!("Progressive download failed to build reqwest client: {}", e);
+                })?;
+
+            let mut response = req_client
+                .get(&stream_url_clone)
+                .send()
+                .await
+                .map_err(|e| {
+                    log::error!("Progressive download failed to send request: {}", e);
+                })?;
+
+            // Read Content-Length
+            if let Some(content_len) = response.content_length() {
+                total_size_clone.store(content_len, std::sync::atomic::Ordering::SeqCst);
+            }
+
+            let mut file = std::fs::File::create(&cache_file_clone).map_err(|e| {
+                log::error!("Progressive download failed to create file: {}", e);
+            })?;
+
+            // Buffer stream bytes
+            loop {
+                match response.chunk().await {
+                    Ok(Some(chunk)) => {
+                        use std::io::Write;
+                        if let Err(e) = file.write_all(&chunk) {
+                            log::error!("Progressive download failed to write to file: {}", e);
+                            break;
+                        }
+                    }
+                    Ok(None) => {
+                        success = true;
+                        break;
+                    }
+                    Err(e) => {
+                        log::error!("Progressive download network error: {}", e);
+                        break;
+                    }
+                }
+            }
+            Ok::<(), ()>(())
+        }
+        .await;
+
+        if res.is_ok() && success {
+            download_complete_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        download_active_clone.store(false, std::sync::atomic::Ordering::SeqCst);
+    });
+
+    // Wait a small amount of time for initial bytes to buffer so Symphonia can probe it
+    let mut attempts = 0;
+    loop {
+        if download_complete.load(std::sync::atomic::Ordering::SeqCst) {
+            break;
+        }
+        if !download_active.load(std::sync::atomic::Ordering::SeqCst) {
+            break;
+        }
+        if cache_file.exists() {
+            if let Ok(meta) = std::fs::metadata(cache_file) {
+                // We need at least 16KB for the container headers to be fully read
+                if meta.len() > 16384 {
+                    break;
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        attempts += 1;
+        if attempts > 50 {
+            // 5 seconds timeout
+            break;
+        }
+    }
+
+    if let Some(ref spinner) = pb {
+        spinner.finish_and_clear();
+    }
+
+    // Verify that the file was created and contains data
+    let file_ok = cache_file.exists()
+        && std::fs::metadata(cache_file)
+            .map(|m| {
+                m.len() >= 16384 || download_complete.load(std::sync::atomic::Ordering::SeqCst)
+            })
+            .unwrap_or(false);
+    if !file_ok {
+        if cache_file.exists() {
+            std::fs::remove_file(cache_file).ok();
+        }
+        return Err(anyhow::anyhow!(
+            "Progressive download failed to initialize stream (download failed or incomplete)"
+        ));
+    }
+
+    // Open the file for progressive playback
+    let file = std::fs::File::open(cache_file)?;
+    let ext = cache_file.extension().and_then(|e| e.to_str());
+    let (sink, _total_dur, vis) = match player.play_progressive(
+        file,
+        ext,
+        Arc::clone(&download_complete),
+        Arc::clone(&download_active),
+        Arc::clone(&total_size),
+    ) {
+        Ok(res) => res,
+        Err(e) => {
+            if cache_file.exists() {
+                std::fs::remove_file(cache_file).ok();
+            }
+            return Err(e);
+        }
+    };
+    sink.set_volume(*current_volume);
+
+    Ok((
+        sink,
+        vis,
+        Some((download_handle, cache_file.clone(), download_complete)),
+    ))
+}
+
 // ---------------------------------------------------------------------------
 // Core playback – reused by both subcommands and interactive menu
 // ---------------------------------------------------------------------------
@@ -651,197 +879,61 @@ async fn play_track(
 
     let (sink, visualizer_shared, download_info) = if use_cache {
         let track_name = format!("{} - {}", title, artist);
-        if let Some((idx, total)) = queue_info {
-            println!(
-                "  💿 [{}/{}] Playing (cached): {}",
-                idx + 1,
-                total,
-                theme::style_primary(&track_name)
-            );
-        } else {
-            println!(
-                "  💿 Playing (cached): {}",
-                theme::style_primary(&track_name)
-            );
-        }
         db.update_cached_track_accessed(video_id).ok();
-        let (sink, _total_dur, vis) = player.play_local(cache_file.clone())?;
-        sink.set_volume(*current_volume);
-        (sink, vis, None)
-    } else {
-        // Remove any partial/corrupted cache file on disk
-        if cache_file.exists() {
-            std::fs::remove_file(&cache_file).ok();
-        }
-
-        let track_name = format!("{} - {}", title, artist);
-        let pb = if !debug {
-            let prefix = if let Some((idx, total)) = queue_info {
-                format!("⏳ [{}/{}]", idx + 1, total)
-            } else {
-                "⏳".to_string()
-            };
-            let spinner = indicatif::ProgressBar::new_spinner();
-            spinner.set_style(
-                indicatif::ProgressStyle::default_spinner()
-                    .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
-                    .template(&format!("  {} {{spinner}} Buffering: {{msg}}", prefix))
-                    .unwrap_or_else(|_| indicatif::ProgressStyle::default_spinner()),
-            );
-            spinner.set_message(theme::style_primary(&track_name).to_string());
-            spinner.enable_steady_tick(Duration::from_millis(80));
-            Some(spinner)
-        } else {
-            if let Some((idx, total)) = queue_info {
-                println!(
-                    "  ⏳ [{}/{}] Buffering: {}",
-                    idx + 1,
-                    total,
-                    theme::style_primary(&track_name)
-                );
-            } else {
-                println!("  ⏳ Buffering: {}", theme::style_primary(&track_name));
+        match player.play_local(cache_file.clone()) {
+            Ok((sink, _total_dur, vis)) => {
+                if let Some((idx, total)) = queue_info {
+                    println!(
+                        "  💿 [{}/{}] Playing (cached): {}",
+                        idx + 1,
+                        total,
+                        theme::style_primary(&track_name)
+                    );
+                } else {
+                    println!(
+                        "  💿 Playing (cached): {}",
+                        theme::style_primary(&track_name)
+                    );
+                }
+                sink.set_volume(*current_volume);
+                (sink, vis, None)
             }
-            None
-        };
-
-        let client = NetworkClient::new();
-        let yt_dlp_path = config.ensure_yt_dlp().await?;
-        let js_runtime = config.get_js_runtime_arg();
-        let cookies_path = Some(config.cookies_path.as_path());
-        let browser = config.get_browser();
-
-        // Extract the direct stream URL
-        let stream_url = match client
-            .get_stream_url(
-                video_id,
-                &yt_dlp_path,
-                &js_runtime,
-                cookies_path,
-                browser.as_deref(),
-            )
-            .await
-        {
-            Ok(url) => url,
             Err(e) => {
-                if let Some(ref spinner) = pb {
-                    spinner.finish_and_clear();
-                }
-                println!(
-                    "  ❌ Failed to get stream URL: {}",
-                    theme::style_error(&e.to_string())
+                log::warn!(
+                    "Cache file corrupted for {}: {}. Deleting cache and streaming...",
+                    video_id,
+                    e
                 );
-                press_enter_to_continue();
-                return Err(e);
-            }
-        };
-
-        // Create references for background task
-        let cache_file_clone = cache_file.clone();
-        let stream_url_clone = stream_url.clone();
-        let download_complete = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let download_complete_clone = Arc::clone(&download_complete);
-        let total_size = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let total_size_clone = Arc::clone(&total_size);
-
-        // Spawn a background task to download the stream using reqwest
-        let download_handle = tokio::spawn(async move {
-            let ua = get_user_agent_for_gvs_url(&stream_url_clone);
-            let req_client = match reqwest::Client::builder().user_agent(ua).build() {
-                Ok(c) => c,
-                Err(e) => {
-                    log::error!("Progressive download failed to build reqwest client: {}", e);
-                    download_complete_clone.store(true, std::sync::atomic::Ordering::SeqCst);
-                    return;
-                }
-            };
-
-            let mut response = match req_client.get(&stream_url_clone).send().await {
-                Ok(res) => res,
-                Err(e) => {
-                    log::error!("Progressive download failed to send request: {}", e);
-                    download_complete_clone.store(true, std::sync::atomic::Ordering::SeqCst);
-                    return;
-                }
-            };
-
-            // Read Content-Length
-            if let Some(content_len) = response.content_length() {
-                total_size_clone.store(content_len, std::sync::atomic::Ordering::SeqCst);
-            }
-
-            let mut file = match std::fs::File::create(&cache_file_clone) {
-                Ok(f) => f,
-                Err(e) => {
-                    log::error!("Progressive download failed to create file: {}", e);
-                    download_complete_clone.store(true, std::sync::atomic::Ordering::SeqCst);
-                    return;
-                }
-            };
-
-            // Buffer stream bytes
-            while let Ok(Some(chunk)) = response.chunk().await {
-                use std::io::Write;
-                if let Err(e) = file.write_all(&chunk) {
-                    log::error!("Progressive download failed to write to file: {}", e);
-                    break;
-                }
-            }
-            download_complete_clone.store(true, std::sync::atomic::Ordering::SeqCst);
-        });
-
-        // Wait a small amount of time for initial bytes to buffer so Symphonia can probe it
-        let mut attempts = 0;
-        loop {
-            if cache_file.exists() {
-                if let Ok(meta) = std::fs::metadata(&cache_file) {
-                    // We need at least 16KB for the container headers to be fully read
-                    if meta.len() > 16384
-                        || download_complete.load(std::sync::atomic::Ordering::SeqCst)
-                    {
-                        break;
-                    }
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            attempts += 1;
-            if attempts > 50 {
-                // 5 seconds timeout
-                break;
+                std::fs::remove_file(&cache_file).ok();
+                db.delete_cached_track(video_id).ok();
+                let progressive_cache_file = config.cache_dir.join(format!("{}.m4a", video_id));
+                play_progressive_track(
+                    video_id,
+                    title,
+                    artist,
+                    config,
+                    queue_info,
+                    &player,
+                    current_volume,
+                    debug,
+                    &progressive_cache_file,
+                )
+                .await?
             }
         }
-
-        if let Some(ref spinner) = pb {
-            spinner.finish_and_clear();
-        }
-
-        // Verify that the file was created and contains data
-        let file_ok = cache_file.exists()
-            && std::fs::metadata(&cache_file)
-                .map(|m| m.len() > 1024)
-                .unwrap_or(false);
-        if !file_ok {
-            return Err(anyhow::anyhow!(
-                "Progressive download failed to initialize stream (empty or missing file)"
-            ));
-        }
-
-        // Open the file for progressive playback
-        let file = std::fs::File::open(&cache_file)?;
-        let ext = cache_file.extension().and_then(|e| e.to_str());
-        let (sink, _total_dur, vis) = player.play_progressive(
-            file,
-            ext,
-            Arc::clone(&download_complete),
-            Arc::clone(&total_size),
-        )?;
-        sink.set_volume(*current_volume);
-
-        (
-            sink,
-            vis,
-            Some((download_handle, cache_file.clone(), download_complete)),
+    } else {
+        play_progressive_track(
+            video_id,
+            title,
+            artist,
+            config,
+            queue_info,
+            &player,
+            current_volume,
+            debug,
+            &cache_file,
         )
+        .await?
     };
 
     db.add_history(video_id, title, artist)?;
@@ -1000,9 +1092,23 @@ fn spawn_prefetch(track: TrackInfo, config: Config, db: Db) -> tokio::task::Join
         let flac_file = config.cache_dir.join(format!("{}.flac", video_id));
         let m4a_file = config.cache_dir.join(format!("{}.m4a", video_id));
 
-        // Check if already exists on disk
-        if flac_file.exists() || m4a_file.exists() {
+        // Check if already cached and registered in DB
+        let is_cached = if let Ok(Some(_)) = db.get_cached_track(video_id) {
+            flac_file.exists() || m4a_file.exists()
+        } else {
+            false
+        };
+
+        if is_cached {
             return;
+        }
+
+        // Clean up any partial/orphaned files on disk from prior aborted tasks
+        if flac_file.exists() {
+            std::fs::remove_file(&flac_file).ok();
+        }
+        if m4a_file.exists() {
+            std::fs::remove_file(&m4a_file).ok();
         }
 
         let cache_file = m4a_file;
@@ -1064,12 +1170,30 @@ fn spawn_prefetch(track: TrackInfo, config: Config, db: Db) -> tokio::task::Join
                 }
             };
 
-            while let Ok(Some(chunk)) = response.chunk().await {
-                use std::io::Write;
-                if let Err(e) = file.write_all(&chunk) {
-                    log::error!("Prefetch failed to write to file: {}", e);
-                    return;
+            let mut success = false;
+            loop {
+                match response.chunk().await {
+                    Ok(Some(chunk)) => {
+                        use std::io::Write;
+                        if let Err(e) = file.write_all(&chunk) {
+                            log::error!("Prefetch failed to write to file: {}", e);
+                            break;
+                        }
+                    }
+                    Ok(None) => {
+                        success = true;
+                        break;
+                    }
+                    Err(e) => {
+                        log::error!("Prefetch network error: {}", e);
+                        break;
+                    }
                 }
+            }
+
+            if !success {
+                std::fs::remove_file(&cache_file).ok();
+                return;
             }
 
             let duration_u32 = track.duration_secs.unwrap_or(0);
@@ -1151,7 +1275,7 @@ async fn play_queue(
         }
 
         let track = &tracks[idx];
-        let control = play_track(
+        let control_res = play_track(
             track,
             config,
             db,
@@ -1159,29 +1283,47 @@ async fn play_queue(
             current_volume,
             debug,
         )
-        .await?;
-        match control {
-            PlaybackControl::Finished | PlaybackControl::Next => {
+        .await;
+
+        match control_res {
+            Ok(control) => match control {
+                PlaybackControl::Finished | PlaybackControl::Next => {
+                    idx += 1;
+                    if idx >= tracks.len() {
+                        println!("\n  Queue finished.");
+                        press_enter_to_continue();
+                        break;
+                    }
+                }
+                PlaybackControl::Prev => {
+                    if idx > 0 {
+                        idx -= 1;
+                    } else {
+                        println!("\n  Already at the first track.");
+                        press_enter_to_continue();
+                    }
+                }
+                PlaybackControl::Quit => {
+                    if let Some((_, handle)) = active_prefetch {
+                        handle.abort();
+                    }
+                    break;
+                }
+            },
+            Err(e) => {
+                println!(
+                    "\n  ❌ Playback failed for '{}': {}",
+                    theme::style_primary(&track.title),
+                    theme::style_error(&e.to_string())
+                );
+                std::io::stdout().flush().ok();
+                tokio::time::sleep(Duration::from_secs(2)).await;
                 idx += 1;
                 if idx >= tracks.len() {
                     println!("\n  Queue finished.");
                     press_enter_to_continue();
                     break;
                 }
-            }
-            PlaybackControl::Prev => {
-                if idx > 0 {
-                    idx -= 1;
-                } else {
-                    println!("\n  Already at the first track.");
-                    press_enter_to_continue();
-                }
-            }
-            PlaybackControl::Quit => {
-                if let Some((_, handle)) = active_prefetch {
-                    handle.abort();
-                }
-                break;
             }
         }
     }

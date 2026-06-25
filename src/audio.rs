@@ -262,14 +262,21 @@ impl symphonia::core::io::MediaSource for MySeekableSource {
 pub struct ProgressiveFile {
     file: File,
     download_complete: Arc<AtomicBool>,
+    download_active: Arc<AtomicBool>,
     total_size: Arc<AtomicU64>,
 }
 
 impl ProgressiveFile {
-    pub fn new(file: File, download_complete: Arc<AtomicBool>, total_size: Arc<AtomicU64>) -> Self {
+    pub fn new(
+        file: File,
+        download_complete: Arc<AtomicBool>,
+        download_active: Arc<AtomicBool>,
+        total_size: Arc<AtomicU64>,
+    ) -> Self {
         Self {
             file,
             download_complete,
+            download_active,
             total_size,
         }
     }
@@ -287,6 +294,11 @@ impl Read for ProgressiveFile {
             // We hit EOF. Check if download is complete.
             if self.download_complete.load(Ordering::SeqCst) {
                 return Ok(0); // Actually EOF
+            }
+
+            // Check if download has failed/stopped
+            if !self.download_active.load(Ordering::SeqCst) {
+                return Ok(0); // Download stopped/failed, return EOF
             }
 
             // Sleep and retry
@@ -326,10 +338,13 @@ impl Seek for ProgressiveFile {
             }
         };
 
-        // Wait until target_pos is available, unless download is complete
+        // Wait until target_pos is available, unless download is complete or failed
         loop {
             let file_len = self.file.metadata()?.len();
-            if target_pos <= file_len || self.download_complete.load(Ordering::SeqCst) {
+            if target_pos <= file_len
+                || self.download_complete.load(Ordering::SeqCst)
+                || !self.download_active.load(Ordering::SeqCst)
+            {
                 break;
             }
             std::thread::sleep(Duration::from_millis(50));
@@ -466,9 +481,10 @@ impl SymphoniaDecoder {
         file: File,
         extension: Option<&str>,
         download_complete: Arc<AtomicBool>,
+        download_active: Arc<AtomicBool>,
         total_size: Arc<AtomicU64>,
     ) -> Result<Self> {
-        let source = ProgressiveFile::new(file, download_complete, total_size);
+        let source = ProgressiveFile::new(file, download_complete, download_active, total_size);
         let mss = symphonia::core::io::MediaSourceStream::new(Box::new(source), Default::default());
 
         let mut hint = symphonia::core::probe::Hint::new();
@@ -713,10 +729,16 @@ impl AudioPlayer {
         file: File,
         extension: Option<&str>,
         download_complete: Arc<AtomicBool>,
+        download_active: Arc<AtomicBool>,
         total_size: Arc<AtomicU64>,
     ) -> Result<(Sink, Duration, Arc<VisualizerShared>)> {
-        let source =
-            SymphoniaDecoder::new_progressive(file, extension, download_complete, total_size)?;
+        let source = SymphoniaDecoder::new_progressive(
+            file,
+            extension,
+            download_complete,
+            download_active,
+            total_size,
+        )?;
         let total_duration = source.total_duration().unwrap_or(Duration::from_secs(0));
         let shared = Arc::new(VisualizerShared::new());
         let vis_source = VisualizerSource::new(source, Arc::clone(&shared));
