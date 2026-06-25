@@ -2,6 +2,7 @@ pub mod audio;
 pub mod config;
 pub mod db;
 pub mod discord;
+pub mod discord_rpc;
 pub mod network;
 pub mod theme;
 
@@ -947,6 +948,10 @@ async fn play_track(
 
     let player = AudioPlayer::new()?;
 
+    let mut rpc = crate::discord_rpc::DiscordRpc::new(config);
+    rpc.connect();
+    rpc.update(track, Duration::from_secs(0), false);
+
     // Keep active playback details fresh on a cleared screen
     clear_screen();
 
@@ -1095,8 +1100,10 @@ async fn play_track(
                             KeyCode::Char(' ') => {
                                 if sink.is_paused() {
                                     sink.play();
+                                    rpc.update(track, elapsed, false);
                                 } else {
                                     sink.pause();
+                                    rpc.update(track, elapsed, true);
                                 }
                             }
                             KeyCode::Char('q') | KeyCode::Esc => {
@@ -1128,6 +1135,7 @@ async fn play_track(
                                             visualizer_shared
                                                 .set_elapsed_ms(new_pos.as_millis() as u64);
                                             last_seek = now_seek;
+                                            rpc.update(track, new_pos, sink.is_paused());
                                         }
                                         Err(e) => {
                                             print!("\r\n  ❌ Left seek failed: {:?}\r\n", e);
@@ -1151,6 +1159,7 @@ async fn play_track(
                                                 visualizer_shared
                                                     .set_elapsed_ms(new_pos.as_millis() as u64);
                                                 last_seek = now_seek;
+                                                rpc.update(track, new_pos, sink.is_paused());
                                             }
                                             Err(e) => {
                                                 print!("\r\n  ❌ Right seek failed: {:?}\r\n", e);
@@ -1182,6 +1191,7 @@ async fn play_track(
         }
         print!("\x1b[7A\r\x1b[K");
         std::io::stdout().flush().ok();
+        rpc.clear();
     }
 
     // Clean up / Register progressive download
@@ -2527,18 +2537,32 @@ async fn run_discord_menu(config: &Config) -> Result<()> {
             _ => "OFF".to_string(),
         };
 
+        let rpc_status = match &settings {
+            Some(s) if s.rpc_enabled => "ON".to_string(),
+            None => "ON".to_string(),
+            _ => "OFF".to_string(),
+        };
+
         let status_str = if enabled_status == "ON" {
             theme::style_primary("ON").to_string()
         } else {
             theme::style_dim("OFF").to_string()
         };
 
+        let rpc_status_str = if rpc_status == "ON" {
+            theme::style_primary("ON").to_string()
+        } else {
+            theme::style_dim("OFF").to_string()
+        };
+
         println!("\n  ── 🤖 Discord Selfbot Mode (Jockie Music) ──");
-        println!("  Status: {}\n", status_str);
+        println!("  Status: {}", status_str);
+        println!("  Discord Rich Presence (RPC): {}\n", rpc_status_str);
 
         let selections = vec![
             format!("Toggle Discord Mode (Currently: {})", enabled_status),
             "Configure Token & Channel ID".to_string(),
+            format!("Toggle Rich Presence (Currently: {})", rpc_status),
             "🔙 Go back".to_string(),
         ];
 
@@ -2554,6 +2578,7 @@ async fn run_discord_menu(config: &Config) -> Result<()> {
                     enabled: false,
                     token: String::new(),
                     channel_id: String::new(),
+                    rpc_enabled: true,
                 });
 
                 if !s.enabled && (s.token.is_empty() || s.channel_id.is_empty()) {
@@ -2601,6 +2626,7 @@ async fn run_discord_menu(config: &Config) -> Result<()> {
                     enabled: false,
                     token: String::new(),
                     channel_id: String::new(),
+                    rpc_enabled: true,
                 });
 
                 let token: String = dialoguer::Input::with_theme(&theme::get_dialoguer_theme())
@@ -2631,6 +2657,22 @@ async fn run_discord_menu(config: &Config) -> Result<()> {
                 config.save_discord_settings(&s)?;
 
                 println!("\n  ✨ Credentials updated successfully.");
+                press_enter_to_continue();
+            }
+            2 => {
+                let mut s = settings.clone().unwrap_or(crate::config::DiscordSettings {
+                    enabled: false,
+                    token: String::new(),
+                    channel_id: String::new(),
+                    rpc_enabled: true,
+                });
+                s.rpc_enabled = !s.rpc_enabled;
+                config.save_discord_settings(&s)?;
+                if s.rpc_enabled {
+                    println!("\n  ✅ Discord Rich Presence enabled!");
+                } else {
+                    println!("\n  ❌ Discord Rich Presence disabled.");
+                }
                 press_enter_to_continue();
             }
             _ => break,

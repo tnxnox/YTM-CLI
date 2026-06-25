@@ -6,6 +6,12 @@ pub struct DiscordSettings {
     pub enabled: bool,
     pub token: String,
     pub channel_id: String,
+    #[serde(default = "default_rpc_enabled")]
+    pub rpc_enabled: bool,
+}
+
+fn default_rpc_enabled() -> bool {
+    true
 }
 
 #[derive(Debug, Clone)]
