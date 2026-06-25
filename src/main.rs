@@ -948,9 +948,33 @@ async fn play_track(
 
     let player = AudioPlayer::new()?;
 
+    let client_id = config
+        .get_discord_settings()
+        .map(|s| s.client_id)
+        .unwrap_or_else(|| "1089228496459345970".to_string());
+
     let mut rpc = crate::discord_rpc::DiscordRpc::new(config);
-    rpc.connect();
-    rpc.update(track, Duration::from_secs(0), false);
+    match rpc.connect(&client_id) {
+        Ok(_) => {
+            if debug {
+                println!(
+                    "  🤖 {}",
+                    theme::style_primary("Successfully connected to Discord RPC")
+                );
+                std::io::stdout().flush().ok();
+            }
+            rpc.update(track, Duration::from_secs(0), false);
+        }
+        Err(e) => {
+            if debug {
+                println!(
+                    "  🤖 {}",
+                    theme::style_error(&format!("Discord RPC connection failed: {}", e))
+                );
+                std::io::stdout().flush().ok();
+            }
+        }
+    }
 
     // Keep active playback details fresh on a cleared screen
     clear_screen();
@@ -2543,6 +2567,11 @@ async fn run_discord_menu(config: &Config) -> Result<()> {
             _ => "OFF".to_string(),
         };
 
+        let client_id = match &settings {
+            Some(s) => s.client_id.clone(),
+            None => "1089228496459345970".to_string(),
+        };
+
         let status_str = if enabled_status == "ON" {
             theme::style_primary("ON").to_string()
         } else {
@@ -2557,12 +2586,14 @@ async fn run_discord_menu(config: &Config) -> Result<()> {
 
         println!("\n  ── 🤖 Discord Selfbot Mode (Jockie Music) ──");
         println!("  Status: {}", status_str);
-        println!("  Discord Rich Presence (RPC): {}\n", rpc_status_str);
+        println!("  Discord Rich Presence (RPC): {}", rpc_status_str);
+        println!("  RPC Client ID: {}\n", theme::style_primary(&client_id));
 
         let selections = vec![
             format!("Toggle Discord Mode (Currently: {})", enabled_status),
             "Configure Token & Channel ID".to_string(),
             format!("Toggle Rich Presence (Currently: {})", rpc_status),
+            "Configure RPC Client ID".to_string(),
             "🔙 Go back".to_string(),
         ];
 
@@ -2579,6 +2610,7 @@ async fn run_discord_menu(config: &Config) -> Result<()> {
                     token: String::new(),
                     channel_id: String::new(),
                     rpc_enabled: true,
+                    client_id: "1089228496459345970".to_string(),
                 });
 
                 if !s.enabled && (s.token.is_empty() || s.channel_id.is_empty()) {
@@ -2627,6 +2659,7 @@ async fn run_discord_menu(config: &Config) -> Result<()> {
                     token: String::new(),
                     channel_id: String::new(),
                     rpc_enabled: true,
+                    client_id: "1089228496459345970".to_string(),
                 });
 
                 let token: String = dialoguer::Input::with_theme(&theme::get_dialoguer_theme())
@@ -2665,6 +2698,7 @@ async fn run_discord_menu(config: &Config) -> Result<()> {
                     token: String::new(),
                     channel_id: String::new(),
                     rpc_enabled: true,
+                    client_id: "1089228496459345970".to_string(),
                 });
                 s.rpc_enabled = !s.rpc_enabled;
                 config.save_discord_settings(&s)?;
@@ -2673,6 +2707,33 @@ async fn run_discord_menu(config: &Config) -> Result<()> {
                 } else {
                     println!("\n  ❌ Discord Rich Presence disabled.");
                 }
+                press_enter_to_continue();
+            }
+            3 => {
+                let mut s = settings.clone().unwrap_or(crate::config::DiscordSettings {
+                    enabled: false,
+                    token: String::new(),
+                    channel_id: String::new(),
+                    rpc_enabled: true,
+                    client_id: "1089228496459345970".to_string(),
+                });
+
+                let client_id: String = dialoguer::Input::with_theme(&theme::get_dialoguer_theme())
+                    .with_prompt("Enter Discord RPC Client ID")
+                    .default(s.client_id)
+                    .interact_text()?;
+
+                let client_id = client_id.trim();
+                if client_id.is_empty() {
+                    println!("  ❌ {}", theme::style_error("Client ID cannot be empty."));
+                    press_enter_to_continue();
+                    continue;
+                }
+
+                s.client_id = client_id.to_string();
+                config.save_discord_settings(&s)?;
+
+                println!("\n  ✨ Client ID updated successfully.");
                 press_enter_to_continue();
             }
             _ => break,

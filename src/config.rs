@@ -8,10 +8,16 @@ pub struct DiscordSettings {
     pub channel_id: String,
     #[serde(default = "default_rpc_enabled")]
     pub rpc_enabled: bool,
+    #[serde(default = "default_client_id")]
+    pub client_id: String,
 }
 
 fn default_rpc_enabled() -> bool {
     true
+}
+
+fn default_client_id() -> String {
+    "1089228496459345970".to_string()
 }
 
 #[derive(Debug, Clone)]
