@@ -11,6 +11,7 @@ tokio = { version = "1.35", features = ["full"] }
 clap = { version = "4.4", features = ["derive"] }
 crossterm = { version = "0.27", features = ["event-stream"] }
 indicatif = "0.17" # For command-line progress bar
+fuzzy-matcher = "0.3.7"
 
 # API & Streaming
 ytmapi-rs = { version = "0.0.12", features = ["simplified-queries"] }

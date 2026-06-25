@@ -713,6 +713,80 @@ async fn play_progressive_track(
     ))
 }
 
+fn is_matching_alternative(original: &TrackInfo, candidate: &TrackInfo) -> bool {
+    let orig_title = original.title.to_lowercase();
+    let cand_title = candidate.title.to_lowercase();
+    let orig_artist = original.artist.to_lowercase();
+    let cand_artist = candidate.artist.to_lowercase();
+
+    // 1. Artist Match Check
+    let artist_match = cand_artist.contains(&orig_artist)
+        || orig_artist.contains(&cand_artist)
+        || cand_artist.split(&[' ', ',', '&', '-'][..]).any(|part| {
+            let p = part.trim();
+            p.len() > 2 && orig_artist.contains(p)
+        });
+
+    if !artist_match {
+        return false;
+    }
+
+    // 2. Duration Match Check
+    if let (Some(orig_dur), Some(cand_dur)) = (original.duration_secs, candidate.duration_secs) {
+        let diff = (orig_dur as i64 - cand_dur as i64).abs();
+        if diff > 45 {
+            return false;
+        }
+    }
+
+    // 3. Title Match Check
+    fn clean_title(title: &str) -> String {
+        let mut cleaned = title.to_string();
+        let suffixes = [
+            "(official video)",
+            "(official audio)",
+            "(audio)",
+            "(video)",
+            "[lyric video]",
+            "(lyric video)",
+            "(lyrics)",
+            "[lyrics]",
+            "(official lyric video)",
+            "(official music video)",
+            "[music video]",
+            "(hq)",
+            "(hd)",
+        ];
+        for suffix in suffixes {
+            cleaned = cleaned.replace(suffix, "");
+        }
+        cleaned.trim().to_string()
+    }
+
+    let clean_orig = clean_title(&orig_title);
+    let clean_cand = clean_title(&cand_title);
+
+    use fuzzy_matcher::FuzzyMatcher;
+    let matcher = fuzzy_matcher::skim::SkimMatcherV2::default();
+    if matcher.fuzzy_match(&clean_cand, &clean_orig).is_some() {
+        let orig_words: Vec<&str> = clean_orig
+            .split_whitespace()
+            .filter(|w| w.len() > 1)
+            .collect();
+        if orig_words.is_empty() {
+            return true;
+        }
+        let matched_words = orig_words
+            .iter()
+            .filter(|&&w| clean_cand.contains(w))
+            .count();
+        let containment_ok = matched_words as f32 / orig_words.len() as f32 >= 0.6;
+        containment_ok
+    } else {
+        false
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Core playback – reused by both subcommands and interactive menu
 // ---------------------------------------------------------------------------
@@ -876,7 +950,7 @@ async fn play_track(
     // Keep active playback details fresh on a cleared screen
     clear_screen();
 
-    let (sink, visualizer_shared, download_info) = if use_cache {
+    let res = if use_cache {
         let track_name = format!("{} - {}", title, artist);
         db.update_cached_track_accessed(video_id).ok();
         match player.play_local(cache_file.clone()) {
@@ -895,7 +969,7 @@ async fn play_track(
                     );
                 }
                 sink.set_volume(*current_volume);
-                (sink, vis, None)
+                Ok((sink, vis, None))
             }
             Err(e) => {
                 log::warn!(
@@ -917,7 +991,7 @@ async fn play_track(
                     debug,
                     &progressive_cache_file,
                 )
-                .await?
+                .await
             }
         }
     } else {
@@ -932,7 +1006,57 @@ async fn play_track(
             debug,
             &cache_file,
         )
-        .await?
+        .await
+    };
+
+    let (sink, visualizer_shared, download_info) = match res {
+        Ok(vals) => vals,
+        Err(e) => {
+            let err_msg = e.to_string();
+            if err_msg.contains("This video is only available to Music Premium members") {
+                println!(
+                    "  🔍 '{}' is premium-only. Searching for a public version...",
+                    theme::style_primary(title)
+                );
+                std::io::stdout().flush().ok();
+                let search_query = format!("{} {}", title, artist);
+                let client = NetworkClient::new();
+                match client.search(&search_query).await {
+                    Ok(results) => {
+                        let alternative = results
+                            .into_iter()
+                            .find(|t| t.id != track.id && is_matching_alternative(track, t));
+                        if let Some(alt_track) = alternative {
+                            println!(
+                                "  🔄 Found alternative: '{}' by '{}'. Playing alternative...",
+                                theme::style_primary(&alt_track.title),
+                                theme::style_primary(&alt_track.artist)
+                            );
+                            std::io::stdout().flush().ok();
+                            let alt_cache_file =
+                                config.cache_dir.join(format!("{}.m4a", alt_track.id));
+                            play_progressive_track(
+                                &alt_track.id,
+                                &alt_track.title,
+                                &alt_track.artist,
+                                config,
+                                queue_info,
+                                &player,
+                                current_volume,
+                                debug,
+                                &alt_cache_file,
+                            )
+                            .await?
+                        } else {
+                            return Err(e);
+                        }
+                    }
+                    Err(_) => return Err(e),
+                }
+            } else {
+                return Err(e);
+            }
+        }
     };
 
     db.add_history(video_id, title, artist)?;

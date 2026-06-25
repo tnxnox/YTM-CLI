@@ -3977,6 +3977,7 @@ dependencies = [
  "crossterm 0.27.0",
  "dialoguer",
  "directories",
+ "fuzzy-matcher",
  "indicatif",
  "log",
  "owo-colors",
