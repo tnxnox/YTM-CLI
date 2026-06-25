@@ -567,7 +567,6 @@ async fn play_progressive_track(
                 "  ❌ Failed to get stream URL: {}",
                 theme::style_error(&e.to_string())
             );
-            press_enter_to_continue();
             return Err(e);
         }
     };
