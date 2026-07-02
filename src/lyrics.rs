@@ -24,6 +24,70 @@ pub struct LyricsData {
 struct LrclibResponse {
     #[serde(rename = "syncedLyrics")]
     synced_lyrics: Option<String>,
+    #[serde(rename = "plainLyrics")]
+    plain_lyrics: Option<String>,
+    #[serde(default)]
+    instrumental: bool,
+}
+
+pub fn parse_plain_lyrics(plain_text: &str, duration_secs: Option<u32>) -> Option<LyricsData> {
+    let raw_lines: Vec<&str> = plain_text
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect();
+
+    if raw_lines.is_empty() {
+        return None;
+    }
+
+    let total_secs = duration_secs.unwrap_or(180).max(30) as f64;
+    let step_secs = total_secs / raw_lines.len() as f64;
+
+    let mut lines = Vec::new();
+    for (i, text) in raw_lines.into_iter().enumerate() {
+        let start_ms = (i as f64 * step_secs * 1000.0) as u64;
+        let end_ms = (((i + 1) as f64 * step_secs * 1000.0) as u64).saturating_sub(300);
+        lines.push(SyncedLine {
+            start_time: Duration::from_millis(start_ms),
+            end_time: Some(Duration::from_millis(end_ms)),
+            text: text.to_string(),
+            words: Vec::new(),
+        });
+    }
+
+    Some(LyricsData { lines })
+}
+
+fn try_parse_response(data: &LrclibResponse, duration_secs: Option<u32>) -> Option<LyricsData> {
+    if let Some(ref lrc_text) = data.synced_lyrics {
+        if !lrc_text.trim().is_empty() {
+            if let Some(parsed) = parse_lrc(lrc_text) {
+                return Some(parsed);
+            }
+        }
+    }
+
+    if data.instrumental {
+        return Some(LyricsData {
+            lines: vec![SyncedLine {
+                start_time: Duration::from_secs(0),
+                end_time: Some(Duration::from_secs(duration_secs.unwrap_or(180) as u64)),
+                text: "🎵 (Instrumental)".to_string(),
+                words: Vec::new(),
+            }],
+        });
+    }
+
+    if let Some(ref plain_text) = data.plain_lyrics {
+        if !plain_text.trim().is_empty() {
+            if let Some(parsed) = parse_plain_lyrics(plain_text, duration_secs) {
+                return Some(parsed);
+            }
+        }
+    }
+
+    None
 }
 
 pub fn parse_timestamp(s: &str) -> Option<Duration> {
@@ -325,8 +389,8 @@ static BLOCKING_HTTP_CLIENT: std::sync::LazyLock<reqwest::blocking::Client> =
     std::sync::LazyLock::new(|| {
         reqwest::blocking::Client::builder()
             .user_agent("YTM-CLI/1.6.0 (https://github.com/tnxnox/YTM-CLI)")
-            .timeout(Duration::from_millis(2500))
-            .connect_timeout(Duration::from_millis(1800))
+            .timeout(Duration::from_millis(8000))
+            .connect_timeout(Duration::from_millis(5000))
             .build()
             .unwrap_or_default()
     });
@@ -409,44 +473,50 @@ fn try_lrclib_get(title: &str, artist: &str, duration_secs: Option<u32>) -> Opti
         params.push(("duration", dur.to_string()));
     }
 
-    if let Ok(res) = BLOCKING_HTTP_CLIENT
-        .get("https://lrclib.net/api/get")
-        .query(&params)
-        .send()
-    {
-        if res.status().is_success() {
-            if let Ok(data) = res.json::<LrclibResponse>() {
-                if let Some(lrc_text) = data.synced_lyrics {
-                    if !lrc_text.trim().is_empty() {
-                        if let Some(parsed) = parse_lrc(&lrc_text) {
-                            return Some(parsed);
-                        }
+    for attempt in 0..2 {
+        if let Ok(res) = BLOCKING_HTTP_CLIENT
+            .get("https://lrclib.net/api/get")
+            .query(&params)
+            .send()
+        {
+            if res.status().is_success() {
+                if let Ok(data) = res.json::<LrclibResponse>() {
+                    if let Some(parsed) = try_parse_response(&data, duration_secs) {
+                        return Some(parsed);
                     }
                 }
+            } else {
+                break;
             }
+        }
+        if attempt == 0 {
+            std::thread::sleep(Duration::from_millis(200));
         }
     }
     None
 }
 
-fn try_lrclib_search(query: &str) -> Option<LyricsData> {
-    if let Ok(res) = BLOCKING_HTTP_CLIENT
-        .get("https://lrclib.net/api/search")
-        .query(&[("q", query)])
-        .send()
-    {
-        if res.status().is_success() {
-            if let Ok(results) = res.json::<Vec<LrclibResponse>>() {
-                for item in results {
-                    if let Some(lrc_text) = item.synced_lyrics {
-                        if !lrc_text.trim().is_empty() {
-                            if let Some(parsed) = parse_lrc(&lrc_text) {
-                                return Some(parsed);
-                            }
+fn try_lrclib_search(query: &str, duration_secs: Option<u32>) -> Option<LyricsData> {
+    for attempt in 0..2 {
+        if let Ok(res) = BLOCKING_HTTP_CLIENT
+            .get("https://lrclib.net/api/search")
+            .query(&[("q", query)])
+            .send()
+        {
+            if res.status().is_success() {
+                if let Ok(results) = res.json::<Vec<LrclibResponse>>() {
+                    for item in results {
+                        if let Some(parsed) = try_parse_response(&item, duration_secs) {
+                            return Some(parsed);
                         }
                     }
                 }
+            } else {
+                break;
             }
+        }
+        if attempt == 0 {
+            std::thread::sleep(Duration::from_millis(200));
         }
     }
     None
@@ -464,45 +534,48 @@ pub fn fetch_lyrics_blocking(
 
     let clean_t = clean_track_title(title);
     let clean_a = clean_artist_name(artist);
+    let clean_key = get_cache_key(&clean_t, &clean_a);
+
+    let save = |d: Option<LyricsData>| {
+        save_to_cache(cache_key.clone(), d.clone());
+        if clean_key != cache_key {
+            save_to_cache(clean_key, d.clone());
+        }
+        d
+    };
 
     // Tier 1: Exact match on cleaned title + artist + duration
     if let Some(data) = try_lrclib_get(&clean_t, &clean_a, duration_secs) {
-        save_to_cache(cache_key, Some(data.clone()));
-        return Some(data);
+        return save(Some(data));
     }
 
     // Tier 2: Exact match on cleaned title + artist (without duration constraint)
     if let Some(data) = try_lrclib_get(&clean_t, &clean_a, None) {
-        save_to_cache(cache_key, Some(data.clone()));
-        return Some(data);
+        return save(Some(data));
     }
 
     // Tier 3: Exact match on raw title + artist (without duration)
     if clean_t != title || clean_a != artist {
         if let Some(data) = try_lrclib_get(title, artist, None) {
-            save_to_cache(cache_key, Some(data.clone()));
-            return Some(data);
+            return save(Some(data));
         }
     }
 
     // Tier 4: Search query with cleaned title + artist
     let search_q = format!("{} {}", clean_t, clean_a);
-    if let Some(data) = try_lrclib_search(&search_q) {
-        save_to_cache(cache_key, Some(data.clone()));
-        return Some(data);
+    if let Some(data) = try_lrclib_search(&search_q, duration_secs) {
+        return save(Some(data));
     }
 
     // Tier 5: Search query with raw title + artist
     if clean_t != title || clean_a != artist {
         let raw_q = format!("{} {}", title, artist);
-        if let Some(data) = try_lrclib_search(&raw_q) {
-            save_to_cache(cache_key, Some(data.clone()));
-            return Some(data);
+        if let Some(data) = try_lrclib_search(&raw_q, duration_secs) {
+            return save(Some(data));
         }
     }
 
-    save_to_cache(cache_key, None);
-    None
+    save(None)
 }
 
 #[cfg(test)]
@@ -574,5 +647,11 @@ mod tests {
     fn test_clean_artist_name() {
         assert_eq!(clean_artist_name("The Weeknd - Topic"), "The Weeknd");
         assert_eq!(clean_artist_name("Drake, Future"), "Drake");
+    }
+
+    #[test]
+    fn test_fetch_lyrics_blocking_real() {
+        let res = fetch_lyrics_blocking("FE!N", "Travis Scott", None);
+        assert!(res.is_some(), "Expected lyrics for FE!N by Travis Scott");
     }
 }
