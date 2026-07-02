@@ -116,7 +116,10 @@ mod tests {
             return;
         }
         let config = Config::new();
-        let is_enabled = config.get_discord_settings().map(|s| s.rpc_enabled).unwrap_or(true);
+        let is_enabled = config
+            .get_discord_settings()
+            .map(|s| s.rpc_enabled)
+            .unwrap_or(true);
         if !is_enabled {
             println!("Skipping Discord RPC connection test because rpc_enabled is false in config");
             return;

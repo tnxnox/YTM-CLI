@@ -58,7 +58,9 @@ pub fn parse_timestamp(s: &str) -> Option<Duration> {
         }
     }
 
-    Some(Duration::from_millis(minutes * 60 * 1000 + seconds * 1000 + ms))
+    Some(Duration::from_millis(
+        minutes * 60 * 1000 + seconds * 1000 + ms,
+    ))
 }
 
 pub fn parse_lrc_line(line_str: &str) -> Option<SyncedLine> {
@@ -145,7 +147,11 @@ pub fn parse_lrc(lrc_text: &str) -> Option<LyricsData> {
         if i + 1 < lines.len() {
             let gap = lines[i + 1].start_time.saturating_sub(lines[i].start_time);
             if gap <= Duration::from_millis(6000) {
-                lines[i].end_time = Some(lines[i + 1].start_time.saturating_sub(Duration::from_millis(300)));
+                lines[i].end_time = Some(
+                    lines[i + 1]
+                        .start_time
+                        .saturating_sub(Duration::from_millis(300)),
+                );
             } else {
                 lines[i].end_time = Some(lines[i].start_time + vocal_est);
             }
@@ -164,7 +170,11 @@ static LYRICS_CACHE: std::sync::LazyLock<Mutex<HashMap<String, Option<LyricsData
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
 fn get_cache_key(title: &str, artist: &str) -> String {
-    format!("{}|||{}", title.trim().to_lowercase(), artist.trim().to_lowercase())
+    format!(
+        "{}|||{}",
+        title.trim().to_lowercase(),
+        artist.trim().to_lowercase()
+    )
 }
 
 pub fn render_active_line(
@@ -194,7 +204,10 @@ pub fn render_active_line(
 
     // Character-weighted word progress for Standard Line LRC
     let start = line.start_time;
-    let raw_gap = line.end_time.unwrap_or(start + Duration::from_secs(4)).saturating_sub(start);
+    let raw_gap = line
+        .end_time
+        .unwrap_or(start + Duration::from_secs(4))
+        .saturating_sub(start);
 
     if adjusted_elapsed < start {
         return crate::theme::style_dim(&line.text).to_string();
@@ -203,7 +216,9 @@ pub fn render_active_line(
     // Vocals usually span most of the line gap (leaving a short ~350ms breath pause before next line).
     // For long instrumental breaks (> 6.5s), cap the active line duration based on character length.
     let sing_duration = if raw_gap.as_secs_f32() <= 6.5 {
-        raw_gap.saturating_sub(Duration::from_millis(350)).max(Duration::from_millis(1000))
+        raw_gap
+            .saturating_sub(Duration::from_millis(350))
+            .max(Duration::from_millis(1000))
     } else {
         let char_count = line.text.chars().count();
         let max_sing_ms = (char_count as u64 * 200).clamp(3000, 6500);
@@ -302,7 +317,12 @@ pub async fn fetch_lyrics(
 
     let mut result_data = None;
 
-    if let Ok(res) = client.get("https://lrclib.net/api/get").query(&params).send().await {
+    if let Ok(res) = client
+        .get("https://lrclib.net/api/get")
+        .query(&params)
+        .send()
+        .await
+    {
         if res.status().is_success() {
             if let Ok(data) = res.json::<LrclibResponse>().await {
                 if let Some(lrc_text) = data.synced_lyrics {
@@ -350,8 +370,14 @@ mod tests {
 
     #[test]
     fn test_parse_timestamp() {
-        assert_eq!(parse_timestamp("01:23.45"), Some(Duration::from_millis(83450)));
-        assert_eq!(parse_timestamp("00:05.100"), Some(Duration::from_millis(5100)));
+        assert_eq!(
+            parse_timestamp("01:23.45"),
+            Some(Duration::from_millis(83450))
+        );
+        assert_eq!(
+            parse_timestamp("00:05.100"),
+            Some(Duration::from_millis(5100))
+        );
         assert_eq!(parse_timestamp("02:10"), Some(Duration::from_secs(130)));
     }
 

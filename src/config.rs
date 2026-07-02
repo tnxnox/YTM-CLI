@@ -114,22 +114,49 @@ impl Config {
     }
 
     pub fn get_cookie_browser_arg(&self) -> Option<String> {
-        self.get_browser().map(|b| self.resolve_browser_cookie_arg(&b))
+        self.get_browser()
+            .map(|b| self.resolve_browser_cookie_arg(&b))
     }
 
     fn find_zen_profile_dir(&self) -> Option<std::path::PathBuf> {
-        let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).ok()?;
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .ok()?;
         let home_path = std::path::Path::new(&home);
 
         let candidate_parents = vec![
             home_path.join(".config").join("zen"),
             home_path.join(".zen"),
-            home_path.join(".var").join("app").join("app.zen_browser.zen").join("data").join("zen"),
-            home_path.join(".var").join("app").join("io.github.zen_browser.zen").join("data").join("zen"),
-            home_path.join("Library").join("Application Support").join("zen"),
-            home_path.join("Library").join("Application Support").join("Zen"),
-            home_path.join("AppData").join("Roaming").join("zen").join("Profiles"),
-            home_path.join("AppData").join("Roaming").join("Zen").join("Profiles"),
+            home_path
+                .join(".var")
+                .join("app")
+                .join("app.zen_browser.zen")
+                .join("data")
+                .join("zen"),
+            home_path
+                .join(".var")
+                .join("app")
+                .join("io.github.zen_browser.zen")
+                .join("data")
+                .join("zen"),
+            home_path
+                .join("Library")
+                .join("Application Support")
+                .join("zen"),
+            home_path
+                .join("Library")
+                .join("Application Support")
+                .join("Zen"),
+            home_path
+                .join("AppData")
+                .join("Roaming")
+                .join("zen")
+                .join("Profiles"),
+            home_path
+                .join("AppData")
+                .join("Roaming")
+                .join("Zen")
+                .join("Profiles"),
         ];
 
         for parent in candidate_parents {
@@ -153,7 +180,11 @@ impl Config {
                     }
                 }
                 if let Some(default_dir) = subdirs.iter().find(|p| {
-                    let name = p.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
+                    let name = p
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_lowercase();
                     name.contains("default")
                 }) {
                     return Some(default_dir.clone());

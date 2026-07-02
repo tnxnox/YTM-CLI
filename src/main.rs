@@ -425,8 +425,12 @@ fn draw_progress_bar(
 
                         if i + 1 < lines.len() {
                             let next_line = &lines[i + 1];
-                            if elapsed >= l.end_time.unwrap_or(l.start_time) && elapsed < next_line.start_time {
-                                if next_line.start_time.saturating_sub(elapsed) <= Duration::from_millis(2500) {
+                            if elapsed >= l.end_time.unwrap_or(l.start_time)
+                                && elapsed < next_line.start_time
+                            {
+                                if next_line.start_time.saturating_sub(elapsed)
+                                    <= Duration::from_millis(2500)
+                                {
                                     active_idx = Some(i + 1);
                                 } else {
                                     active_idx = Some(i);
@@ -440,7 +444,9 @@ fn draw_progress_bar(
                     if active_idx.is_none() {
                         if let Some(first) = lines.first() {
                             if elapsed < first.start_time {
-                                if first.start_time.saturating_sub(elapsed) <= Duration::from_millis(2500) {
+                                if first.start_time.saturating_sub(elapsed)
+                                    <= Duration::from_millis(2500)
+                                {
                                     active_idx = Some(0);
                                 }
                             } else if let Some(last) = lines.last() {
@@ -472,7 +478,8 @@ fn draw_progress_bar(
                                 String::new()
                             };
 
-                            let active_str = crate::lyrics::render_active_line(&lines[idx], elapsed, visualizer);
+                            let active_str =
+                                crate::lyrics::render_active_line(&lines[idx], elapsed, visualizer);
 
                             let next_str = if idx + 1 < lines.len() {
                                 theme::style_dim(&lines[idx + 1].text).to_string()
@@ -1219,7 +1226,8 @@ async fn play_track(
         .get_setting("lyrics_enabled")
         .ok()
         .flatten()
-        .unwrap_or_else(|| "true".to_string()) == "true";
+        .unwrap_or_else(|| "true".to_string())
+        == "true";
 
     let lyrics_state = if lyrics_enabled {
         let state = Arc::new(std::sync::RwLock::new(LyricsState::Loading));
@@ -1422,7 +1430,8 @@ fn spawn_prefetch(track: TrackInfo, config: Config, db: Db) -> tokio::task::Join
         .get_setting("lyrics_enabled")
         .ok()
         .flatten()
-        .unwrap_or_else(|| "true".to_string()) == "true";
+        .unwrap_or_else(|| "true".to_string())
+        == "true";
 
     if lyrics_enabled {
         let title_clone = track.title.clone();
@@ -2948,7 +2957,8 @@ async fn run_interactive_menu(
             .get_setting("lyrics_enabled")
             .ok()
             .flatten()
-            .unwrap_or_else(|| "true".to_string()) == "true";
+            .unwrap_or_else(|| "true".to_string())
+            == "true";
         let lyrics_status = if lyrics_enabled {
             theme::style_primary("ON").to_string()
         } else {
