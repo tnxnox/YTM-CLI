@@ -341,6 +341,117 @@ fn save_to_cache(key: String, data: Option<LyricsData>) {
     guard.insert(key, data);
 }
 
+pub fn clean_track_title(title: &str) -> String {
+    let mut filtered = String::new();
+    let mut depth = 0;
+    for c in title.chars() {
+        match c {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => {
+                if depth > 0 {
+                    depth -= 1;
+                }
+            }
+            _ => {
+                if depth == 0 {
+                    filtered.push(c);
+                }
+            }
+        }
+    }
+
+    let mut clean = filtered.trim();
+
+    if let Some(dash_idx) = clean.find(" - ") {
+        let suffix = clean[dash_idx + 3..].to_lowercase();
+        if suffix.contains("official")
+            || suffix.contains("video")
+            || suffix.contains("audio")
+            || suffix.contains("remaster")
+            || suffix.contains("live")
+            || suffix.contains("topic")
+            || suffix.contains("version")
+            || suffix.contains("hd")
+            || suffix.contains("4k")
+        {
+            clean = clean[..dash_idx].trim();
+        }
+    }
+
+    if clean.is_empty() {
+        title.trim().to_string()
+    } else {
+        clean.to_string()
+    }
+}
+
+pub fn clean_artist_name(artist: &str) -> String {
+    let mut clean = artist.trim();
+    if clean.to_lowercase().ends_with(" - topic") {
+        clean = clean[..clean.len() - 8].trim();
+    }
+    if let Some(comma_idx) = clean.find(',') {
+        clean = clean[..comma_idx].trim();
+    }
+    if clean.is_empty() {
+        artist.trim().to_string()
+    } else {
+        clean.to_string()
+    }
+}
+
+fn try_lrclib_get(title: &str, artist: &str, duration_secs: Option<u32>) -> Option<LyricsData> {
+    let mut params = vec![
+        ("track_name", title.to_string()),
+        ("artist_name", artist.to_string()),
+    ];
+    if let Some(dur) = duration_secs {
+        params.push(("duration", dur.to_string()));
+    }
+
+    if let Ok(res) = BLOCKING_HTTP_CLIENT
+        .get("https://lrclib.net/api/get")
+        .query(&params)
+        .send()
+    {
+        if res.status().is_success() {
+            if let Ok(data) = res.json::<LrclibResponse>() {
+                if let Some(lrc_text) = data.synced_lyrics {
+                    if !lrc_text.trim().is_empty() {
+                        if let Some(parsed) = parse_lrc(&lrc_text) {
+                            return Some(parsed);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn try_lrclib_search(query: &str) -> Option<LyricsData> {
+    if let Ok(res) = BLOCKING_HTTP_CLIENT
+        .get("https://lrclib.net/api/search")
+        .query(&[("q", query)])
+        .send()
+    {
+        if res.status().is_success() {
+            if let Ok(results) = res.json::<Vec<LrclibResponse>>() {
+                for item in results {
+                    if let Some(lrc_text) = item.synced_lyrics {
+                        if !lrc_text.trim().is_empty() {
+                            if let Some(parsed) = parse_lrc(&lrc_text) {
+                                return Some(parsed);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 pub fn fetch_lyrics_blocking(
     title: &str,
     artist: &str,
@@ -351,56 +462,47 @@ pub fn fetch_lyrics_blocking(
         return cached;
     }
 
-    let mut params = vec![
-        ("track_name", title.to_string()),
-        ("artist_name", artist.to_string()),
-    ];
-    if let Some(dur) = duration_secs {
-        params.push(("duration", dur.to_string()));
+    let clean_t = clean_track_title(title);
+    let clean_a = clean_artist_name(artist);
+
+    // Tier 1: Exact match on cleaned title + artist + duration
+    if let Some(data) = try_lrclib_get(&clean_t, &clean_a, duration_secs) {
+        save_to_cache(cache_key, Some(data.clone()));
+        return Some(data);
     }
 
-    let mut result_data = None;
+    // Tier 2: Exact match on cleaned title + artist (without duration constraint)
+    if let Some(data) = try_lrclib_get(&clean_t, &clean_a, None) {
+        save_to_cache(cache_key, Some(data.clone()));
+        return Some(data);
+    }
 
-    if let Ok(res) = BLOCKING_HTTP_CLIENT
-        .get("https://lrclib.net/api/get")
-        .query(&params)
-        .send()
-    {
-        if res.status().is_success() {
-            if let Ok(data) = res.json::<LrclibResponse>() {
-                if let Some(lrc_text) = data.synced_lyrics {
-                    if let Some(parsed) = parse_lrc(&lrc_text) {
-                        result_data = Some(parsed);
-                    }
-                }
-            }
+    // Tier 3: Exact match on raw title + artist (without duration)
+    if clean_t != title || clean_a != artist {
+        if let Some(data) = try_lrclib_get(title, artist, None) {
+            save_to_cache(cache_key, Some(data.clone()));
+            return Some(data);
         }
     }
 
-    if result_data.is_none() {
-        let query = format!("{} {}", title, artist);
-        if let Ok(res) = BLOCKING_HTTP_CLIENT
-            .get("https://lrclib.net/api/search")
-            .query(&[("q", &query)])
-            .send()
-        {
-            if res.status().is_success() {
-                if let Ok(results) = res.json::<Vec<LrclibResponse>>() {
-                    for item in results {
-                        if let Some(lrc_text) = item.synced_lyrics {
-                            if let Some(parsed) = parse_lrc(&lrc_text) {
-                                result_data = Some(parsed);
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
+    // Tier 4: Search query with cleaned title + artist
+    let search_q = format!("{} {}", clean_t, clean_a);
+    if let Some(data) = try_lrclib_search(&search_q) {
+        save_to_cache(cache_key, Some(data.clone()));
+        return Some(data);
+    }
+
+    // Tier 5: Search query with raw title + artist
+    if clean_t != title || clean_a != artist {
+        let raw_q = format!("{} {}", title, artist);
+        if let Some(data) = try_lrclib_search(&raw_q) {
+            save_to_cache(cache_key, Some(data.clone()));
+            return Some(data);
         }
     }
 
-    save_to_cache(cache_key, result_data.clone());
-    result_data
+    save_to_cache(cache_key, None);
+    None
 }
 
 #[cfg(test)]
@@ -452,5 +554,25 @@ mod tests {
         };
         let rendered = render_active_line(&line, Duration::from_secs(1), None, 20);
         assert!(rendered.contains('…'));
+    }
+
+    #[test]
+    fn test_clean_track_title() {
+        assert_eq!(
+            clean_track_title("Blinding Lights (Official Music Video)"),
+            "Blinding Lights"
+        );
+        assert_eq!(clean_track_title("Starboy (feat. Daft Punk)"), "Starboy");
+        assert_eq!(
+            clean_track_title("Hotel California - 2013 Remaster"),
+            "Hotel California"
+        );
+        assert_eq!(clean_track_title("Numb [Explicit]"), "Numb");
+    }
+
+    #[test]
+    fn test_clean_artist_name() {
+        assert_eq!(clean_artist_name("The Weeknd - Topic"), "The Weeknd");
+        assert_eq!(clean_artist_name("Drake, Future"), "Drake");
     }
 }
