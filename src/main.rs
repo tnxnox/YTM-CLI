@@ -215,10 +215,10 @@ fn truncate(s: &str, max_chars: usize) -> String {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum LyricsState {
     Loading,
-    Loaded(crate::lyrics::LyricsData),
+    Loaded(std::sync::Arc<crate::lyrics::LyricsData>),
     Unavailable,
 }
 
@@ -1250,7 +1250,7 @@ async fn play_track(
         == "true";
 
     let lyrics_state = if lyrics_enabled {
-        let state = Arc::new(std::sync::RwLock::new(LyricsState::Loading));
+        let state = Arc::new(std::sync::Mutex::new(LyricsState::Loading));
         let state_clone = Arc::clone(&state);
         let title_clone = title.to_string();
         let artist_clone = artist.to_string();
@@ -1259,11 +1259,11 @@ async fn play_track(
         std::thread::spawn(move || {
             let res =
                 crate::lyrics::fetch_lyrics_blocking(&title_clone, &artist_clone, duration_secs);
-            if let Ok(mut w) = state_clone.write() {
+            if let Ok(mut lock) = state_clone.lock() {
                 if let Some(data) = res {
-                    *w = LyricsState::Loaded(data);
+                    *lock = LyricsState::Loaded(Arc::new(data));
                 } else {
-                    *w = LyricsState::Unavailable;
+                    *lock = LyricsState::Unavailable;
                 }
             }
         });
@@ -1300,14 +1300,17 @@ async fn play_track(
         while !sink.empty() {
             let elapsed = Duration::from_millis(visualizer_shared.get_elapsed_ms());
 
-            let l_state = lyrics_state.as_ref().and_then(|s| s.read().ok());
+            let current_lyrics_state = lyrics_state
+                .as_ref()
+                .and_then(|s| s.lock().ok().map(|g| g.clone()));
+
             draw_progress_bar(
                 elapsed,
                 total_duration,
                 sink.volume(),
                 sink.is_paused(),
                 Some(&visualizer_shared),
-                l_state.as_deref(),
+                current_lyrics_state.as_ref(),
                 show_lyrics,
             );
 
