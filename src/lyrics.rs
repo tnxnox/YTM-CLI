@@ -322,14 +322,15 @@ pub fn render_active_line(
     )
 }
 
-static HTTP_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
-    reqwest::Client::builder()
-        .user_agent("YTM-CLI/1.6.0 (https://github.com/tnxnox/YTM-CLI)")
-        .timeout(Duration::from_millis(2000))
-        .connect_timeout(Duration::from_millis(1500))
-        .build()
-        .unwrap_or_default()
-});
+static BLOCKING_HTTP_CLIENT: std::sync::LazyLock<reqwest::blocking::Client> =
+    std::sync::LazyLock::new(|| {
+        reqwest::blocking::Client::builder()
+            .user_agent("YTM-CLI/1.6.0 (https://github.com/tnxnox/YTM-CLI)")
+            .timeout(Duration::from_millis(2500))
+            .connect_timeout(Duration::from_millis(1800))
+            .build()
+            .unwrap_or_default()
+    });
 
 fn get_from_cache(key: &str) -> Option<Option<LyricsData>> {
     let guard = LYRICS_CACHE.lock().unwrap_or_else(|e| e.into_inner());
@@ -341,79 +342,66 @@ fn save_to_cache(key: String, data: Option<LyricsData>) {
     guard.insert(key, data);
 }
 
-pub async fn fetch_lyrics(
+pub fn fetch_lyrics_blocking(
     title: &str,
     artist: &str,
     duration_secs: Option<u32>,
-) -> Result<Option<LyricsData>> {
+) -> Option<LyricsData> {
     let cache_key = get_cache_key(title, artist);
     if let Some(cached) = get_from_cache(&cache_key) {
-        return Ok(cached);
+        return cached;
     }
 
-    let title_str = title.to_string();
-    let artist_str = artist.to_string();
+    let mut params = vec![
+        ("track_name", title.to_string()),
+        ("artist_name", artist.to_string()),
+    ];
+    if let Some(dur) = duration_secs {
+        params.push(("duration", dur.to_string()));
+    }
 
-    let fetch_future = async move {
-        let mut params = vec![
-            ("track_name", title_str.clone()),
-            ("artist_name", artist_str.clone()),
-        ];
-        if let Some(dur) = duration_secs {
-            params.push(("duration", dur.to_string()));
-        }
+    let mut result_data = None;
 
-        let mut result_data = None;
-
-        if let Ok(res) = HTTP_CLIENT
-            .get("https://lrclib.net/api/get")
-            .query(&params)
-            .send()
-            .await
-        {
-            if res.status().is_success() {
-                if let Ok(data) = res.json::<LrclibResponse>().await {
-                    if let Some(lrc_text) = data.synced_lyrics {
-                        if let Some(parsed) = parse_lrc(&lrc_text) {
-                            result_data = Some(parsed);
-                        }
+    if let Ok(res) = BLOCKING_HTTP_CLIENT
+        .get("https://lrclib.net/api/get")
+        .query(&params)
+        .send()
+    {
+        if res.status().is_success() {
+            if let Ok(data) = res.json::<LrclibResponse>() {
+                if let Some(lrc_text) = data.synced_lyrics {
+                    if let Some(parsed) = parse_lrc(&lrc_text) {
+                        result_data = Some(parsed);
                     }
                 }
             }
         }
+    }
 
-        if result_data.is_none() {
-            let query = format!("{} {}", title_str, artist_str);
-            if let Ok(res) = HTTP_CLIENT
-                .get("https://lrclib.net/api/search")
-                .query(&[("q", &query)])
-                .send()
-                .await
-            {
-                if res.status().is_success() {
-                    if let Ok(results) = res.json::<Vec<LrclibResponse>>().await {
-                        for item in results {
-                            if let Some(lrc_text) = item.synced_lyrics {
-                                if let Some(parsed) = parse_lrc(&lrc_text) {
-                                    result_data = Some(parsed);
-                                    break;
-                                }
+    if result_data.is_none() {
+        let query = format!("{} {}", title, artist);
+        if let Ok(res) = BLOCKING_HTTP_CLIENT
+            .get("https://lrclib.net/api/search")
+            .query(&[("q", &query)])
+            .send()
+        {
+            if res.status().is_success() {
+                if let Ok(results) = res.json::<Vec<LrclibResponse>>() {
+                    for item in results {
+                        if let Some(lrc_text) = item.synced_lyrics {
+                            if let Some(parsed) = parse_lrc(&lrc_text) {
+                                result_data = Some(parsed);
+                                break;
                             }
                         }
                     }
                 }
             }
         }
-        Ok::<Option<LyricsData>, anyhow::Error>(result_data)
-    };
+    }
 
-    let result = match tokio::time::timeout(Duration::from_millis(3000), fetch_future).await {
-        Ok(Ok(data)) => data,
-        _ => None,
-    };
-
-    save_to_cache(cache_key, result.clone());
-    Ok(result)
+    save_to_cache(cache_key, result_data.clone());
+    result_data
 }
 
 #[cfg(test)]

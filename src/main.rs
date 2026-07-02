@@ -1249,30 +1249,27 @@ async fn play_track(
         .unwrap_or_else(|| "true".to_string())
         == "true";
 
-    let (lyrics_state, lyrics_task_handle) = if lyrics_enabled {
+    let lyrics_state = if lyrics_enabled {
         let state = Arc::new(std::sync::RwLock::new(LyricsState::Loading));
         let state_clone = Arc::clone(&state);
         let title_clone = title.to_string();
         let artist_clone = artist.to_string();
         let duration_secs = track.duration_secs;
 
-        let handle = tokio::spawn(async move {
-            match crate::lyrics::fetch_lyrics(&title_clone, &artist_clone, duration_secs).await {
-                Ok(Some(data)) => {
-                    if let Ok(mut w) = state_clone.write() {
-                        *w = LyricsState::Loaded(data);
-                    }
-                }
-                _ => {
-                    if let Ok(mut w) = state_clone.write() {
-                        *w = LyricsState::Unavailable;
-                    }
+        std::thread::spawn(move || {
+            let res =
+                crate::lyrics::fetch_lyrics_blocking(&title_clone, &artist_clone, duration_secs);
+            if let Ok(mut w) = state_clone.write() {
+                if let Some(data) = res {
+                    *w = LyricsState::Loaded(data);
+                } else {
+                    *w = LyricsState::Unavailable;
                 }
             }
         });
-        (Some(state), Some(handle))
+        Some(state)
     } else {
-        (None, None)
+        None
     };
 
     let mut show_lyrics = lyrics_enabled;
@@ -1411,11 +1408,6 @@ async fn play_track(
                 }
             }
         }
-        // Abort background lyrics task if still running
-        if let Some(h) = lyrics_task_handle {
-            h.abort();
-        }
-
         // Clear all rendered UI lines (visualizer + progress bar + optional lyrics section)
         let total_lines_to_clear = if show_lyrics && lyrics_state.is_some() {
             12
@@ -1467,8 +1459,8 @@ fn spawn_prefetch(track: TrackInfo, config: Config, db: Db) -> tokio::task::Join
         let title_clone = track.title.clone();
         let artist_clone = track.artist.clone();
         let duration_secs = track.duration_secs;
-        tokio::spawn(async move {
-            let _ = crate::lyrics::fetch_lyrics(&title_clone, &artist_clone, duration_secs).await;
+        std::thread::spawn(move || {
+            crate::lyrics::fetch_lyrics_blocking(&title_clone, &artist_clone, duration_secs);
         });
     }
 
