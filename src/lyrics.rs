@@ -388,7 +388,7 @@ pub fn render_active_line(
 static BLOCKING_HTTP_CLIENT: std::sync::LazyLock<reqwest::blocking::Client> =
     std::sync::LazyLock::new(|| {
         reqwest::blocking::Client::builder()
-            .user_agent("YTM-CLI/1.6.0 (https://github.com/tnxnox/YTM-CLI)")
+            .user_agent("YTM-CLI/1.6.1 (https://github.com/tnxnox/YTM-CLI)")
             .timeout(Duration::from_millis(8000))
             .connect_timeout(Duration::from_millis(5000))
             .build()
