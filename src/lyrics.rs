@@ -290,28 +290,42 @@ pub fn render_active_line(
     )
 }
 
+static HTTP_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
+    reqwest::Client::builder()
+        .user_agent("YTM-CLI/1.6.0 (https://github.com/tnxnox/YTM-CLI)")
+        .timeout(Duration::from_millis(2000))
+        .connect_timeout(Duration::from_millis(1500))
+        .build()
+        .unwrap_or_default()
+});
+
+fn get_from_cache(key: &str) -> Option<Option<LyricsData>> {
+    let guard = LYRICS_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    guard.get(key).cloned()
+}
+
+fn save_to_cache(key: String, data: Option<LyricsData>) {
+    let mut guard = LYRICS_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    guard.insert(key, data);
+}
+
 pub async fn fetch_lyrics(
     title: &str,
     artist: &str,
     duration_secs: Option<u32>,
 ) -> Result<Option<LyricsData>> {
     let cache_key = get_cache_key(title, artist);
-    if let Ok(guard) = LYRICS_CACHE.lock() {
-        if let Some(cached) = guard.get(&cache_key) {
-            return Ok(cached.clone());
-        }
+    if let Some(cached) = get_from_cache(&cache_key) {
+        return Ok(cached);
     }
 
-    let fetch_future = async {
-        let client = reqwest::Client::builder()
-            .user_agent("YTM-CLI/1.6.0 (https://github.com/tnxnox/YTM-CLI)")
-            .timeout(Duration::from_millis(2000))
-            .connect_timeout(Duration::from_millis(1500))
-            .build()?;
+    let title_str = title.to_string();
+    let artist_str = artist.to_string();
 
+    let fetch_future = async move {
         let mut params = vec![
-            ("track_name", title.to_string()),
-            ("artist_name", artist.to_string()),
+            ("track_name", title_str.clone()),
+            ("artist_name", artist_str.clone()),
         ];
         if let Some(dur) = duration_secs {
             params.push(("duration", dur.to_string()));
@@ -319,7 +333,7 @@ pub async fn fetch_lyrics(
 
         let mut result_data = None;
 
-        if let Ok(res) = client
+        if let Ok(res) = HTTP_CLIENT
             .get("https://lrclib.net/api/get")
             .query(&params)
             .send()
@@ -337,8 +351,8 @@ pub async fn fetch_lyrics(
         }
 
         if result_data.is_none() {
-            let query = format!("{} {}", title, artist);
-            if let Ok(res) = client
+            let query = format!("{} {}", title_str, artist_str);
+            if let Ok(res) = HTTP_CLIENT
                 .get("https://lrclib.net/api/search")
                 .query(&[("q", &query)])
                 .send()
@@ -366,10 +380,7 @@ pub async fn fetch_lyrics(
         _ => None,
     };
 
-    if let Ok(mut guard) = LYRICS_CACHE.lock() {
-        guard.insert(cache_key, result.clone());
-    }
-
+    save_to_cache(cache_key, result.clone());
     Ok(result)
 }
 

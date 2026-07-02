@@ -1233,14 +1233,14 @@ async fn play_track(
         .unwrap_or_else(|| "true".to_string())
         == "true";
 
-    let lyrics_state = if lyrics_enabled {
+    let (lyrics_state, lyrics_task_handle) = if lyrics_enabled {
         let state = Arc::new(std::sync::RwLock::new(LyricsState::Loading));
         let state_clone = Arc::clone(&state);
         let title_clone = title.to_string();
         let artist_clone = artist.to_string();
         let duration_secs = track.duration_secs;
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             match crate::lyrics::fetch_lyrics(&title_clone, &artist_clone, duration_secs).await {
                 Ok(Some(data)) => {
                     if let Ok(mut w) = state_clone.write() {
@@ -1254,9 +1254,9 @@ async fn play_track(
                 }
             }
         });
-        Some(state)
+        (Some(state), Some(handle))
     } else {
-        None
+        (None, None)
     };
 
     let mut show_lyrics = lyrics_enabled;
@@ -1395,11 +1395,21 @@ async fn play_track(
                 }
             }
         }
-        // Clear all 7 visualizer lines and the progress bar line when playback stops/finishes
-        for _ in 0..7 {
+        // Abort background lyrics task if still running
+        if let Some(h) = lyrics_task_handle {
+            h.abort();
+        }
+
+        // Clear all rendered UI lines (visualizer + progress bar + optional lyrics section)
+        let total_lines_to_clear = if show_lyrics && lyrics_state.is_some() {
+            12
+        } else {
+            8
+        };
+        for _ in 0..total_lines_to_clear {
             print!("\n\r\x1b[K");
         }
-        print!("\x1b[7A\r\x1b[K");
+        print!("\x1b[{}A\r\x1b[K", total_lines_to_clear);
         std::io::stdout().flush().ok();
         rpc.clear();
     }
