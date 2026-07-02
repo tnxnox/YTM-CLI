@@ -181,6 +181,7 @@ pub fn render_active_line(
     line: &SyncedLine,
     elapsed: Duration,
     visualizer: Option<&crate::audio::VisualizerShared>,
+    max_width: usize,
 ) -> String {
     if line.text.is_empty() {
         return String::new();
@@ -192,15 +193,46 @@ pub fn render_active_line(
     // Word-level highlighting (Enhanced LRC with explicit timestamps)
     if !line.words.is_empty() {
         let mut result = String::new();
+        let mut char_budget = max_width;
         for word in &line.words {
-            if adjusted_elapsed >= word.start_time {
-                result.push_str(&crate::theme::style_accent(&word.text).to_string());
+            let w_chars = word.text.chars().count();
+            if char_budget == 0 {
+                break;
+            }
+            let word_text = if w_chars > char_budget {
+                let mut tr: String = word
+                    .text
+                    .chars()
+                    .take(char_budget.saturating_sub(1))
+                    .collect();
+                tr.push('…');
+                char_budget = 0;
+                tr
             } else {
-                result.push_str(&crate::theme::style_dim(&word.text).to_string());
+                char_budget = char_budget.saturating_sub(w_chars);
+                word.text.clone()
+            };
+
+            if adjusted_elapsed >= word.start_time {
+                result.push_str(&crate::theme::style_accent(&word_text).to_string());
+            } else {
+                result.push_str(&crate::theme::style_dim(&word_text).to_string());
             }
         }
         return result;
     }
+
+    let text_to_render = if line.text.chars().count() > max_width {
+        let mut tr: String = line
+            .text
+            .chars()
+            .take(max_width.saturating_sub(1))
+            .collect();
+        tr.push('…');
+        tr
+    } else {
+        line.text.clone()
+    };
 
     // Character-weighted word progress for Standard Line LRC
     let start = line.start_time;
@@ -210,7 +242,7 @@ pub fn render_active_line(
         .saturating_sub(start);
 
     if adjusted_elapsed < start {
-        return crate::theme::style_dim(&line.text).to_string();
+        return crate::theme::style_dim(&text_to_render).to_string();
     }
 
     // Vocals usually span most of the line gap (leaving a short ~350ms breath pause before next line).
@@ -220,14 +252,14 @@ pub fn render_active_line(
             .saturating_sub(Duration::from_millis(350))
             .max(Duration::from_millis(1000))
     } else {
-        let char_count = line.text.chars().count();
+        let char_count = text_to_render.chars().count();
         let max_sing_ms = (char_count as u64 * 200).clamp(3000, 6500);
         Duration::from_millis(max_sing_ms.min(raw_gap.as_millis() as u64))
     };
 
     let end = start + sing_duration;
     if adjusted_elapsed >= end {
-        return crate::theme::style_accent(&line.text).to_string();
+        return crate::theme::style_accent(&text_to_render).to_string();
     }
 
     let duration_ms = sing_duration.as_millis() as f32;
@@ -253,14 +285,14 @@ pub fn render_active_line(
         (time_fraction + (vocal_energy - 0.08) * 0.15).clamp(0.0, 1.0)
     };
 
-    let words: Vec<&str> = line.text.split_inclusive(' ').collect();
+    let words: Vec<&str> = text_to_render.split_inclusive(' ').collect();
     if words.is_empty() {
-        return crate::theme::style_accent(&line.text).to_string();
+        return crate::theme::style_accent(&text_to_render).to_string();
     }
 
     let total_chars: usize = words.iter().map(|w| w.chars().count()).sum();
     if total_chars == 0 {
-        return crate::theme::style_accent(&line.text).to_string();
+        return crate::theme::style_accent(&text_to_render).to_string();
     }
 
     let target_char_count = (progress_fraction * total_chars as f32).round() as usize;
@@ -421,5 +453,17 @@ mod tests {
         assert_eq!(parsed.words[0].text, "Hello ");
         assert_eq!(parsed.words[1].start_time, Duration::from_millis(11500));
         assert_eq!(parsed.words[1].text, "world");
+    }
+
+    #[test]
+    fn test_render_active_line_truncation() {
+        let line = SyncedLine {
+            start_time: Duration::from_secs(0),
+            end_time: Some(Duration::from_secs(5)),
+            text: "This is a very long lyric line that exceeds terminal width".to_string(),
+            words: Vec::new(),
+        };
+        let rendered = render_active_line(&line, Duration::from_secs(1), None, 20);
+        assert!(rendered.contains('…'));
     }
 }

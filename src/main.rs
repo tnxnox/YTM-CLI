@@ -461,12 +461,24 @@ fn draw_progress_bar(
                         }
                     }
 
+                    let max_lyric_len = term_width.saturating_sub(8).max(20);
+                    let trunc = |s: &str| -> String {
+                        if s.chars().count() > max_lyric_len {
+                            let mut tr: String =
+                                s.chars().take(max_lyric_len.saturating_sub(1)).collect();
+                            tr.push('…');
+                            tr
+                        } else {
+                            s.to_string()
+                        }
+                    };
+
                     if let Some(idx) = active_idx {
                         if is_instrumental {
-                            let prev_str = theme::style_dim(&lines[idx].text).to_string();
+                            let prev_str = theme::style_dim(&trunc(&lines[idx].text)).to_string();
                             let active_str = theme::style_dim("🎵 (Instrumental)").to_string();
                             let next_str = if idx + 1 < lines.len() {
-                                theme::style_dim(&lines[idx + 1].text).to_string()
+                                theme::style_dim(&trunc(&lines[idx + 1].text)).to_string()
                             } else {
                                 String::new()
                             };
@@ -477,16 +489,20 @@ fn draw_progress_bar(
                             lines_printed += 3;
                         } else {
                             let prev_str = if idx > 0 {
-                                theme::style_dim(&lines[idx - 1].text).to_string()
+                                theme::style_dim(&trunc(&lines[idx - 1].text)).to_string()
                             } else {
                                 String::new()
                             };
 
-                            let active_str =
-                                crate::lyrics::render_active_line(&lines[idx], elapsed, visualizer);
+                            let active_str = crate::lyrics::render_active_line(
+                                &lines[idx],
+                                elapsed,
+                                visualizer,
+                                max_lyric_len,
+                            );
 
                             let next_str = if idx + 1 < lines.len() {
-                                theme::style_dim(&lines[idx + 1].text).to_string()
+                                theme::style_dim(&trunc(&lines[idx + 1].text)).to_string()
                             } else {
                                 String::new()
                             };
@@ -498,7 +514,7 @@ fn draw_progress_bar(
                         }
                     } else {
                         let first_str = if let Some(first) = lines.first() {
-                            theme::style_dim(&first.text).to_string()
+                            theme::style_dim(&trunc(&first.text)).to_string()
                         } else {
                             String::new()
                         };
