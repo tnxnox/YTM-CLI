@@ -302,66 +302,75 @@ pub async fn fetch_lyrics(
         }
     }
 
-    let client = reqwest::Client::builder()
-        .user_agent("YTM-CLI/1.6.0 (https://github.com/tnxnox/YTM-CLI)")
-        .timeout(Duration::from_secs(5))
-        .build()?;
+    let fetch_future = async {
+        let client = reqwest::Client::builder()
+            .user_agent("YTM-CLI/1.6.0 (https://github.com/tnxnox/YTM-CLI)")
+            .timeout(Duration::from_millis(2000))
+            .connect_timeout(Duration::from_millis(1500))
+            .build()?;
 
-    let mut params = vec![
-        ("track_name", title.to_string()),
-        ("artist_name", artist.to_string()),
-    ];
-    if let Some(dur) = duration_secs {
-        params.push(("duration", dur.to_string()));
-    }
-
-    let mut result_data = None;
-
-    if let Ok(res) = client
-        .get("https://lrclib.net/api/get")
-        .query(&params)
-        .send()
-        .await
-    {
-        if res.status().is_success() {
-            if let Ok(data) = res.json::<LrclibResponse>().await {
-                if let Some(lrc_text) = data.synced_lyrics {
-                    if let Some(parsed) = parse_lrc(&lrc_text) {
-                        result_data = Some(parsed);
-                    }
-                }
-            }
+        let mut params = vec![
+            ("track_name", title.to_string()),
+            ("artist_name", artist.to_string()),
+        ];
+        if let Some(dur) = duration_secs {
+            params.push(("duration", dur.to_string()));
         }
-    }
 
-    if result_data.is_none() {
-        let query = format!("{} {}", title, artist);
+        let mut result_data = None;
+
         if let Ok(res) = client
-            .get("https://lrclib.net/api/search")
-            .query(&[("q", &query)])
+            .get("https://lrclib.net/api/get")
+            .query(&params)
             .send()
             .await
         {
             if res.status().is_success() {
-                if let Ok(results) = res.json::<Vec<LrclibResponse>>().await {
-                    for item in results {
-                        if let Some(lrc_text) = item.synced_lyrics {
-                            if let Some(parsed) = parse_lrc(&lrc_text) {
-                                result_data = Some(parsed);
-                                break;
+                if let Ok(data) = res.json::<LrclibResponse>().await {
+                    if let Some(lrc_text) = data.synced_lyrics {
+                        if let Some(parsed) = parse_lrc(&lrc_text) {
+                            result_data = Some(parsed);
+                        }
+                    }
+                }
+            }
+        }
+
+        if result_data.is_none() {
+            let query = format!("{} {}", title, artist);
+            if let Ok(res) = client
+                .get("https://lrclib.net/api/search")
+                .query(&[("q", &query)])
+                .send()
+                .await
+            {
+                if res.status().is_success() {
+                    if let Ok(results) = res.json::<Vec<LrclibResponse>>().await {
+                        for item in results {
+                            if let Some(lrc_text) = item.synced_lyrics {
+                                if let Some(parsed) = parse_lrc(&lrc_text) {
+                                    result_data = Some(parsed);
+                                    break;
+                                }
                             }
                         }
                     }
                 }
             }
         }
-    }
+        Ok::<Option<LyricsData>, anyhow::Error>(result_data)
+    };
+
+    let result = match tokio::time::timeout(Duration::from_millis(3000), fetch_future).await {
+        Ok(Ok(data)) => data,
+        _ => None,
+    };
 
     if let Ok(mut guard) = LYRICS_CACHE.lock() {
-        guard.insert(cache_key, result_data.clone());
+        guard.insert(cache_key, result.clone());
     }
 
-    Ok(result_data)
+    Ok(result)
 }
 
 #[cfg(test)]

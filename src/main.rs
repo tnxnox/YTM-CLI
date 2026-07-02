@@ -399,12 +399,16 @@ fn draw_progress_bar(
                 LyricsState::Loading => {
                     let msg = theme::style_dim("[ ⏳ Fetching synced lyrics... ]");
                     print!("\n\r\x1b[K  {}", msg);
-                    lines_printed += 1;
+                    print!("\n\r\x1b[K");
+                    print!("\n\r\x1b[K");
+                    lines_printed += 3;
                 }
                 LyricsState::Unavailable => {
                     let msg = theme::style_dim("[ 🎤 Synced lyrics unavailable ]");
                     print!("\n\r\x1b[K  {}", msg);
-                    lines_printed += 1;
+                    print!("\n\r\x1b[K");
+                    print!("\n\r\x1b[K");
+                    lines_printed += 3;
                 }
                 LyricsState::Loaded(lyrics_data) => {
                     let lines = &lyrics_data.lines;
