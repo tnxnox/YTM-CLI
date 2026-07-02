@@ -103,8 +103,72 @@ impl Config {
         "node".to_string()
     }
 
+    pub fn resolve_browser_cookie_arg(&self, browser: &str) -> String {
+        if browser.trim().eq_ignore_ascii_case("zen") {
+            if let Some(profile_dir) = self.find_zen_profile_dir() {
+                return format!("firefox:{}", profile_dir.display());
+            }
+            return "firefox".to_string();
+        }
+        browser.to_string()
+    }
+
+    pub fn get_cookie_browser_arg(&self) -> Option<String> {
+        self.get_browser().map(|b| self.resolve_browser_cookie_arg(&b))
+    }
+
+    fn find_zen_profile_dir(&self) -> Option<std::path::PathBuf> {
+        let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).ok()?;
+        let home_path = std::path::Path::new(&home);
+
+        let candidate_parents = vec![
+            home_path.join(".config").join("zen"),
+            home_path.join(".zen"),
+            home_path.join(".var").join("app").join("app.zen_browser.zen").join("data").join("zen"),
+            home_path.join(".var").join("app").join("io.github.zen_browser.zen").join("data").join("zen"),
+            home_path.join("Library").join("Application Support").join("zen"),
+            home_path.join("Library").join("Application Support").join("Zen"),
+            home_path.join("AppData").join("Roaming").join("zen").join("Profiles"),
+            home_path.join("AppData").join("Roaming").join("Zen").join("Profiles"),
+        ];
+
+        for parent in candidate_parents {
+            if !parent.exists() {
+                continue;
+            }
+
+            if parent.join("cookies.sqlite").exists() {
+                return Some(parent);
+            }
+
+            if let Ok(entries) = std::fs::read_dir(&parent) {
+                let mut subdirs = Vec::new();
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        if path.join("cookies.sqlite").exists() {
+                            return Some(path);
+                        }
+                        subdirs.push(path);
+                    }
+                }
+                if let Some(default_dir) = subdirs.iter().find(|p| {
+                    let name = p.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
+                    name.contains("default")
+                }) {
+                    return Some(default_dir.clone());
+                }
+                if let Some(first) = subdirs.first() {
+                    return Some(first.clone());
+                }
+            }
+        }
+        None
+    }
+
     pub async fn login(&self, browser: &str) -> Result<(), anyhow::Error> {
         let yt_dlp_path = self.ensure_yt_dlp().await?;
+        let cookie_arg = self.resolve_browser_cookie_arg(browser);
         println!(
             "  🔑 Verifying cookies from {}... (Please close the browser if it is Chromium-based)",
             browser
@@ -117,7 +181,7 @@ impl Config {
                 "--remote-components",
                 "ejs:github",
                 "--cookies-from-browser",
-                browser,
+                &cookie_arg,
                 "--skip-download",
                 "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
             ])

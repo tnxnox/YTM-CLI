@@ -3,6 +3,7 @@ pub mod config;
 pub mod db;
 pub mod discord;
 pub mod discord_rpc;
+pub mod lyrics;
 pub mod network;
 pub mod theme;
 
@@ -71,7 +72,7 @@ enum Commands {
     },
     /// Log in to YouTube Music to access library
     Login {
-        /// The browser to extract cookies from (e.g. firefox, chrome, chromium, brave, edge)
+        /// The browser to extract cookies from (e.g. firefox, zen, chrome, chromium, brave, edge)
         #[arg(short, long, default_value = "firefox")]
         browser: String,
     },
@@ -141,7 +142,7 @@ async fn fetch_playlist_with_retry(
     playlist_url: &str,
 ) -> Result<Vec<TrackInfo>, anyhow::Error> {
     let yt_dlp_path = config.ensure_yt_dlp().await?;
-    let browser = config.get_browser();
+    let browser = config.get_cookie_browser_arg();
     let js_runtime = config.get_js_runtime_arg();
 
     let first_try = client
@@ -214,12 +215,21 @@ fn truncate(s: &str, max_chars: usize) -> String {
     }
 }
 
+#[derive(Debug)]
+pub enum LyricsState {
+    Loading,
+    Loaded(crate::lyrics::LyricsData),
+    Unavailable,
+}
+
 fn draw_progress_bar(
     elapsed: Duration,
     total: Option<Duration>,
     volume: f32,
     is_paused: bool,
     visualizer: Option<&crate::audio::VisualizerShared>,
+    lyrics_state: Option<&LyricsState>,
+    show_lyrics: bool,
 ) {
     let elapsed_str = format_duration(elapsed);
     let total_str = match total {
@@ -312,13 +322,11 @@ fn draw_progress_bar(
             let mut row_str = String::new();
             for col in 0..num_columns {
                 let val = columns[col];
-                // Apply a compressed gain using square root (boosts quiet sections, reduces clipping on peaks)
                 let col_factor = col as f32 / (num_columns - 1) as f32;
                 let gain = 1.5 + col_factor * 1.5;
                 let compressed = val.sqrt();
                 let scaled_val = (compressed * gain).clamp(0.0, 1.0);
 
-                // Row math: 5 levels of height, row_idx is 0 (bottom) to 4 (top)
                 let h = (scaled_val * num_rows as f32 - row_idx as f32).clamp(0.0, 1.0);
                 let block_idx = (h * 8.0).round() as usize;
                 let block_char = blocks[block_idx];
@@ -362,6 +370,8 @@ fn draw_progress_bar(
         }
     }
 
+    let mut lines_printed = 0;
+
     // Carriage return and clear line for progress bar
     print!(
         "\r\x1b[K  {}  [ {}{}{} ]  {}  {}",
@@ -371,13 +381,128 @@ fn draw_progress_bar(
     if visualizer.is_some() {
         // 1. Print two blank spacer lines to put it lower
         print!("\n\r\x1b[K\n\r\x1b[K");
+        lines_printed += 2;
 
         // 2. Print the five equalizer rows
         for row_str in &visualizer_rows {
             print!("\n\r\x1b[K{:indent$}{}", "", row_str, indent = left_padding);
+            lines_printed += 1;
         }
-        // Cursor back up 7 lines (2 spacers + 5 rows) and carriage return
-        print!("\x1b[7A\r");
+    }
+
+    if show_lyrics {
+        if let Some(state) = lyrics_state {
+            print!("\n\r\x1b[K");
+            lines_printed += 1;
+
+            match state {
+                LyricsState::Loading => {
+                    let msg = theme::style_dim("[ ⏳ Fetching synced lyrics... ]");
+                    print!("\n\r\x1b[K  {}", msg);
+                    lines_printed += 1;
+                }
+                LyricsState::Unavailable => {
+                    let msg = theme::style_dim("[ 🎤 Synced lyrics unavailable ]");
+                    print!("\n\r\x1b[K  {}", msg);
+                    lines_printed += 1;
+                }
+                LyricsState::Loaded(lyrics_data) => {
+                    let lines = &lyrics_data.lines;
+                    let mut active_idx = None;
+                    let mut is_instrumental = false;
+
+                    for (i, l) in lines.iter().enumerate() {
+                        let next_start = if i + 1 < lines.len() {
+                            lines[i + 1].start_time
+                        } else {
+                            l.end_time.unwrap_or(l.start_time + Duration::from_secs(5))
+                        };
+
+                        if elapsed >= l.start_time && elapsed < l.end_time.unwrap_or(next_start) {
+                            active_idx = Some(i);
+                            break;
+                        }
+
+                        if i + 1 < lines.len() {
+                            let next_line = &lines[i + 1];
+                            if elapsed >= l.end_time.unwrap_or(l.start_time) && elapsed < next_line.start_time {
+                                if next_line.start_time.saturating_sub(elapsed) <= Duration::from_millis(2500) {
+                                    active_idx = Some(i + 1);
+                                } else {
+                                    active_idx = Some(i);
+                                    is_instrumental = true;
+                                }
+                                break;
+                            }
+                        }
+                    }
+
+                    if active_idx.is_none() {
+                        if let Some(first) = lines.first() {
+                            if elapsed < first.start_time {
+                                if first.start_time.saturating_sub(elapsed) <= Duration::from_millis(2500) {
+                                    active_idx = Some(0);
+                                }
+                            } else if let Some(last) = lines.last() {
+                                if elapsed >= last.start_time {
+                                    active_idx = Some(lines.len() - 1);
+                                }
+                            }
+                        }
+                    }
+
+                    if let Some(idx) = active_idx {
+                        if is_instrumental {
+                            let prev_str = theme::style_dim(&lines[idx].text).to_string();
+                            let active_str = theme::style_dim("🎵 (Instrumental)").to_string();
+                            let next_str = if idx + 1 < lines.len() {
+                                theme::style_dim(&lines[idx + 1].text).to_string()
+                            } else {
+                                String::new()
+                            };
+
+                            print!("\n\r\x1b[K  {}", prev_str);
+                            print!("\n\r\x1b[K  {}", active_str);
+                            print!("\n\r\x1b[K  {}", next_str);
+                            lines_printed += 3;
+                        } else {
+                            let prev_str = if idx > 0 {
+                                theme::style_dim(&lines[idx - 1].text).to_string()
+                            } else {
+                                String::new()
+                            };
+
+                            let active_str = crate::lyrics::render_active_line(&lines[idx], elapsed, visualizer);
+
+                            let next_str = if idx + 1 < lines.len() {
+                                theme::style_dim(&lines[idx + 1].text).to_string()
+                            } else {
+                                String::new()
+                            };
+
+                            print!("\n\r\x1b[K  {}", prev_str);
+                            print!("\n\r\x1b[K  🎤 {}", active_str);
+                            print!("\n\r\x1b[K  {}", next_str);
+                            lines_printed += 3;
+                        }
+                    } else {
+                        let first_str = if let Some(first) = lines.first() {
+                            theme::style_dim(&first.text).to_string()
+                        } else {
+                            String::new()
+                        };
+                        print!("\n\r\x1b[K  ");
+                        print!("\n\r\x1b[K  🎵 ...");
+                        print!("\n\r\x1b[K  {}", first_str);
+                        lines_printed += 3;
+                    }
+                }
+            }
+        }
+    }
+
+    if lines_printed > 0 {
+        print!("\x1b[{}A\r", lines_printed);
     }
 
     std::io::stdout().flush().ok();
@@ -546,7 +671,7 @@ async fn play_progressive_track(
     let yt_dlp_path = config.ensure_yt_dlp().await?;
     let js_runtime = config.get_js_runtime_arg();
     let cookies_path = Some(config.cookies_path.as_path());
-    let browser = config.get_browser();
+    let browser = config.get_cookie_browser_arg();
 
     // Extract the direct stream URL
     let stream_url = match client
@@ -861,7 +986,7 @@ async fn play_track(
                         elapsed += delta;
                     }
 
-                    draw_progress_bar(elapsed, total_duration, 1.0, is_paused, None);
+                    draw_progress_bar(elapsed, total_duration, 1.0, is_paused, None, None, false);
 
                     if event::poll(Duration::from_millis(100))? {
                         if let Event::Key(key_event) = event::read()? {
@@ -1090,10 +1215,53 @@ async fn play_track(
 
     db.add_history(video_id, title, artist)?;
 
-    let controls_help = if queue_info.is_some() {
-        "  🎮 Controls: [Space] Play/Pause  [←/→] Seek  [↑/↓] Volume  [N] Next  [P] Prev  [Q] Stop/Back"
+    let lyrics_enabled = db
+        .get_setting("lyrics_enabled")
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "true".to_string()) == "true";
+
+    let lyrics_state = if lyrics_enabled {
+        let state = Arc::new(std::sync::RwLock::new(LyricsState::Loading));
+        let state_clone = Arc::clone(&state);
+        let title_clone = title.to_string();
+        let artist_clone = artist.to_string();
+        let duration_secs = track.duration_secs;
+
+        tokio::spawn(async move {
+            match crate::lyrics::fetch_lyrics(&title_clone, &artist_clone, duration_secs).await {
+                Ok(Some(data)) => {
+                    if let Ok(mut w) = state_clone.write() {
+                        *w = LyricsState::Loaded(data);
+                    }
+                }
+                _ => {
+                    if let Ok(mut w) = state_clone.write() {
+                        *w = LyricsState::Unavailable;
+                    }
+                }
+            }
+        });
+        Some(state)
     } else {
-        "  🎮 Controls: [Space] Play/Pause  [←/→] Seek  [↑/↓] Volume  [Q] Stop/Back"
+        None
+    };
+
+    let mut show_lyrics = lyrics_enabled;
+
+    let controls_help = match (queue_info.is_some(), lyrics_enabled) {
+        (true, true) => {
+            "  🎮 Controls: [Space] Play/Pause  [←/→] Seek  [↑/↓] Volume  [L] Lyrics  [N] Next  [P] Prev  [Q] Stop/Back"
+        }
+        (true, false) => {
+            "  🎮 Controls: [Space] Play/Pause  [←/→] Seek  [↑/↓] Volume  [N] Next  [P] Prev  [Q] Stop/Back"
+        }
+        (false, true) => {
+            "  🎮 Controls: [Space] Play/Pause  [←/→] Seek  [↑/↓] Volume  [L] Lyrics  [Q] Stop/Back"
+        }
+        (false, false) => {
+            "  🎮 Controls: [Space] Play/Pause  [←/→] Seek  [↑/↓] Volume  [Q] Stop/Back"
+        }
     };
     println!("{}", theme::style_dim(controls_help));
 
@@ -1107,12 +1275,15 @@ async fn play_track(
         while !sink.empty() {
             let elapsed = Duration::from_millis(visualizer_shared.get_elapsed_ms());
 
+            let l_state = lyrics_state.as_ref().and_then(|s| s.read().ok());
             draw_progress_bar(
                 elapsed,
                 total_duration,
                 sink.volume(),
                 sink.is_paused(),
                 Some(&visualizer_shared),
+                l_state.as_deref(),
+                show_lyrics,
             );
 
             if event::poll(Duration::from_millis(40))? {
@@ -1129,6 +1300,9 @@ async fn play_track(
                                     sink.pause();
                                     rpc.update(track, elapsed, true);
                                 }
+                            }
+                            KeyCode::Char('l') | KeyCode::Char('L') => {
+                                show_lyrics = !show_lyrics;
                             }
                             KeyCode::Char('q') | KeyCode::Esc => {
                                 sink.stop();
@@ -1244,6 +1418,21 @@ async fn play_track(
 }
 
 fn spawn_prefetch(track: TrackInfo, config: Config, db: Db) -> tokio::task::JoinHandle<()> {
+    let lyrics_enabled = db
+        .get_setting("lyrics_enabled")
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "true".to_string()) == "true";
+
+    if lyrics_enabled {
+        let title_clone = track.title.clone();
+        let artist_clone = track.artist.clone();
+        let duration_secs = track.duration_secs;
+        tokio::spawn(async move {
+            let _ = crate::lyrics::fetch_lyrics(&title_clone, &artist_clone, duration_secs).await;
+        });
+    }
+
     tokio::spawn(async move {
         let video_id = &track.id;
         let flac_file = config.cache_dir.join(format!("{}.flac", video_id));
@@ -1274,7 +1463,7 @@ fn spawn_prefetch(track: TrackInfo, config: Config, db: Db) -> tokio::task::Join
             let client = NetworkClient::new();
             let js_runtime = config.get_js_runtime_arg();
             let cookies_path = Some(config.cookies_path.as_path());
-            let browser = config.get_browser();
+            let browser = config.get_cookie_browser_arg();
 
             // Extract the stream URL
             let stream_url = match client
@@ -2337,6 +2526,7 @@ async fn run_cache_menu(config: &Config, db: &Db) -> Result<()> {
 async fn run_login_flow(config: &Config) -> Result<()> {
     let browsers = &[
         "firefox",
+        "zen",
         "chrome",
         "chromium",
         "brave",
@@ -2491,7 +2681,7 @@ async fn run_library_playlists(
         let yt_dlp_path = config.ensure_yt_dlp().await?;
 
         println!("\n  Fetching your playlists...");
-        let browser = config.get_browser();
+        let browser = config.get_cookie_browser_arg();
         let playlists = match client
             .fetch_library_playlists(
                 &yt_dlp_path,
@@ -2754,12 +2944,32 @@ async fn run_interactive_menu(
         theme::print_banner();
         let logged_in = config.is_logged_in();
 
+        let lyrics_enabled = db
+            .get_setting("lyrics_enabled")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "true".to_string()) == "true";
+        let lyrics_status = if lyrics_enabled {
+            theme::style_primary("ON").to_string()
+        } else {
+            theme::style_dim("OFF").to_string()
+        };
+
+        let discord_settings = config.get_discord_settings();
+        let discord_enabled = matches!(&discord_settings, Some(s) if s.enabled);
+        let discord_status = if discord_enabled {
+            theme::style_primary("ON").to_string()
+        } else {
+            theme::style_dim("OFF").to_string()
+        };
+
         let mut selections = vec![
             "🔍 Search and Play (Tracks)".to_string(),
             "💿 Search Albums".to_string(),
             "📜 Playback History".to_string(),
             "💾 Cache Management".to_string(),
-            "🤖 Discord Selfbot Mode".to_string(),
+            format!("🎤 Lyrics Engine (Currently: {})", lyrics_status),
+            format!("🤖 Discord Selfbot Mode (Currently: {})", discord_status),
         ];
         if logged_in {
             selections.push("🎵 My Playlists".to_string());
@@ -2780,15 +2990,25 @@ async fn run_interactive_menu(
             1 => run_search_albums_and_play(config, db, client, current_volume, debug).await?,
             2 => run_history(config, db, client, current_volume, debug).await?,
             3 => run_cache_menu(config, db).await?,
-            4 => run_discord_menu(config).await?,
-            5 => {
+            4 => {
+                let new_val = if lyrics_enabled { "false" } else { "true" };
+                db.set_setting("lyrics_enabled", new_val)?;
+                if new_val == "true" {
+                    println!("  ✨ Lyrics engine activated.");
+                } else {
+                    println!("  ✨ Lyrics engine deactivated.");
+                }
+                press_enter_to_continue();
+            }
+            5 => run_discord_menu(config).await?,
+            6 => {
                 if logged_in {
                     run_library_playlists(config, db, client, current_volume, debug).await?;
                 } else {
                     run_login_flow(config).await?;
                 }
             }
-            6 => {
+            7 => {
                 if logged_in {
                     config.logout()?;
                     println!("  ✨ Logged out successfully.");
@@ -2798,7 +3018,7 @@ async fn run_interactive_menu(
                     break;
                 }
             }
-            7 => {
+            8 => {
                 println!("  Goodbye! 👋");
                 break;
             }
