@@ -1314,7 +1314,7 @@ async fn play_track(
                 show_lyrics,
             );
 
-            if event::poll(Duration::from_millis(40))? {
+            if event::poll(Duration::from_millis(60))? {
                 if let Event::Key(key_event) = event::read()? {
                     if key_event.kind == event::KeyEventKind::Press
                         || key_event.kind == event::KeyEventKind::Repeat
