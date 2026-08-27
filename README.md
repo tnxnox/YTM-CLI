@@ -18,16 +18,17 @@ A lightweight, high-performance, and feature-rich YouTube Music client for the t
   - Seamless RGB horizontal color gradients (Slate Blue ➔ Purple ➔ Orchid).
   - Non-linear square root amplitude compression to prevent height pegging/clipping.
   - Rendered at ~25 FPS across 5 terminal rows using Unicode block elements (` ▂▃▄▅▆▇█`).
+- **🎤 Real-Time Synced Lyrics:** Automatic multi-provider timestamped lyrics engine (LRCLib & cache) synced with playback, highlighting the current line in real time.
+- **🐧 Linux MPRIS & Media Key Support:** Full D-Bus `org.mpris.MediaPlayer2` integration allowing hardware media keys (Play/Pause, Next, Previous, Seek) and desktop widgets (`playerctl`, Waybar, GNOME/KDE, OS media controls) to control playback.
+- **❤️ Favorites & Liked Songs:** Save and manage favorite tracks with one keypress (`[F]`), browse them in an interactive table, or play them with shuffle.
+- **📁 Custom Local Playlists:** Create and manage offline playlists stored in SQLite without needing a YouTube account. Add any playing song directly with `[A]`.
+- **📜 Interactive Live Queue Viewer:** Press `[Tab]` during playback to view upcoming tracks, jump directly to any song, or remove items from the queue.
+- **🔁 Advanced Playback Modes:** Repeat Single Track (`🔂`), Repeat Entire Queue (`🔁`), Mute toggle (`[M]`), and on-the-fly queue shuffling (`[S]`).
 - **💿 Album Search & Playback:** Search for albums/EPs directly, select an album from the interactive menu, and play all its tracks in sequence.
 - **📻 Smart Autoplay (Infinite Queue):** Automatically creates a radio queue based on your selected track and dynamically fetches continuations in the background as you play.
-- **🤖 Discord Selfbot Mode:** Remote control your Discord `Jockie Music` bot directly from your terminal. Playback controls are seamlessly synchronized with the Discord bot.
-- **⚡ Background Prefetching:** Automatically pre-downloads the next track in the queue in the background for zero-latency, gapless transitions.
-- **💾 Local Caching:** Audio is cached locally as `.flac` files (avoiding seeking distortion and decoder panics) and tracked in a local SQLite database.
+- **🤖 Discord Selfbot & RPC Mode:** Remote control your Discord `Jockie Music` bot directly from your terminal and showcase active tracks on Discord Rich Presence.
+- **⚡ Background Prefetching & Caching:** Automatically pre-downloads the next track in the queue in the background for zero-latency, gapless transitions.
 - **🔑 Account Integration:** Seamless cookie extraction from local browsers (Firefox, Chrome, Brave, Chromium, Edge, Opera, Vivaldi) to load and play your private library playlists.
-- **🚀 Performance-Optimized:**
-  - Zero-allocation lazy text styling for the terminal progress bar redraw loop.
-  - Thread-safe shared database connection (`Arc<Mutex<Connection>>`).
-  - High-performance typed JSON deserialization bypassing heavy generic JSON mappings.
 
 ---
 
@@ -38,8 +39,15 @@ During playback, you can control the music in real time:
 | Key | Action |
 | --- | --- |
 | `[Space]` | Play / Pause |
-| `[←]` / `[→]` | Seek Backward / Forward (10s) |
+| `[←]` / `[→]` | Seek Backward / Forward (5s) |
 | `[↑]` / `[↓]` | Increase / Decrease Volume |
+| `[M]` | Mute / Unmute Volume |
+| `[R]` | Cycle Repeat Mode (Off ➔ 🔂 Track ➔ 🔁 Queue) |
+| `[S]` | Shuffle Upcoming Tracks in Queue |
+| `[Tab]` | Open Interactive Live Queue Viewer & Track Jump |
+| `[F]` | Toggle Favorite / Liked Song (❤️) |
+| `[A]` | Add Current Track to Local Playlist |
+| `[L]` | Toggle Synced Lyrics Display |
 | `[N]` | Skip to Next Track |
 | `[P]` | Go back to Previous Track |
 | `[Q]` / `[Esc]` | Stop Playback & Go Back |
@@ -84,6 +92,20 @@ You can also run one-off commands directly:
   ```bash
   ytm-cli album "Nevermind"
   ```
+- **Play or shuffle your favorite / liked songs:**
+  ```bash
+  ytm-cli favorites
+  ytm-cli favorites --shuffle
+  ```
+- **Play or manage custom local playlists:**
+  ```bash
+  ytm-cli local-playlist "Workout Mix"
+  ytm-cli local-playlist "Workout Mix" --shuffle
+  ```
+- **Play a public/private playlist (with optional shuffle):**
+  ```bash
+  ytm-cli playlist "https://music.youtube.com/playlist?list=..." --shuffle
+  ```
 - **Search and print a table of tracks:**
   ```bash
   ytm-cli search "Rim'K Air Max"
@@ -91,10 +113,6 @@ You can also run one-off commands directly:
 - **Search and print a table of matching albums:**
   ```bash
   ytm-cli search-album "Nevermind"
-  ```
-- **Play a public/private playlist (with optional shuffle):**
-  ```bash
-  ytm-cli playlist "https://music.youtube.com/playlist?list=..." --shuffle
   ```
 - **Manage downloaded cache:**
   ```bash

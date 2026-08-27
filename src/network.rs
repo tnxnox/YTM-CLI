@@ -232,12 +232,104 @@ impl NetworkClient {
         Ok(())
     }
 
+    pub async fn fetch_playlist_ytdlp(
+        yt_dlp_path: &std::path::Path,
+        browser: Option<&str>,
+        cookies_path: &std::path::Path,
+        js_runtime: &str,
+        playlist_url: &str,
+    ) -> Result<Vec<TrackInfo>, anyhow::Error> {
+        let mut cmd = tokio::process::Command::new(yt_dlp_path);
+        cmd.args(&[
+            "--no-warnings",
+            "--js-runtimes",
+            js_runtime,
+            "--remote-components",
+            "ejs:github",
+            "--flat-playlist",
+            "-J",
+        ]);
+
+        if let Some(b) = browser {
+            cmd.arg("--cookies-from-browser").arg(b);
+        } else if cookies_path.exists()
+            && std::fs::metadata(cookies_path)
+                .map(|m| m.len() > 0)
+                .unwrap_or(false)
+        {
+            cmd.arg("--cookies").arg(cookies_path);
+        }
+
+        let full_url = if playlist_url.starts_with("http") {
+            playlist_url.to_string()
+        } else {
+            format!("https://www.youtube.com/playlist?list={}", playlist_url)
+        };
+
+        cmd.arg(&full_url);
+        cmd.kill_on_drop(true);
+
+        let output = cmd.output().await?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("login") || stderr.contains("cookie") || stderr.contains("private") {
+                return Err(anyhow::anyhow!("SESSION_EXPIRED"));
+            }
+            return Err(anyhow::anyhow!("yt-dlp playlist fetch failed: {}", stderr));
+        }
+
+        #[derive(Deserialize)]
+        struct YtDlpPlaylistDump {
+            entries: Option<Vec<YtDlpPlaylistItem>>,
+        }
+
+        #[derive(Deserialize)]
+        struct YtDlpPlaylistItem {
+            id: Option<String>,
+            title: Option<String>,
+            uploader: Option<String>,
+            channel: Option<String>,
+            duration: Option<f64>,
+        }
+
+        let dump: YtDlpPlaylistDump = serde_json::from_slice(&output.stdout)?;
+        let mut tracks = Vec::new();
+
+        if let Some(entries) = dump.entries {
+            for entry in entries {
+                let id = match entry.id {
+                    Some(id) if !id.is_empty() => id,
+                    _ => continue,
+                };
+                let title = entry.title.unwrap_or_else(|| "Untitled Track".to_string());
+                let artist = entry
+                    .uploader
+                    .or(entry.channel)
+                    .unwrap_or_else(|| "Unknown Artist".to_string());
+                let duration_secs = entry.duration.map(|d| d.round() as u32);
+
+                tracks.push(TrackInfo {
+                    id,
+                    title,
+                    artist,
+                    duration_secs,
+                });
+            }
+        }
+
+        if tracks.is_empty() {
+            return Err(anyhow::anyhow!("No tracks found in playlist."));
+        }
+
+        Ok(tracks)
+    }
+
     pub async fn fetch_playlist(
         &self,
         yt_dlp_path: &std::path::Path,
         browser: Option<&str>,
         cookies_path: &std::path::Path,
-        _js_runtime: &str,
+        js_runtime: &str,
         playlist_url: &str,
     ) -> Result<Vec<TrackInfo>, anyhow::Error> {
         let _ = self.load_cookies(yt_dlp_path, browser, cookies_path).await;
@@ -290,34 +382,45 @@ impl NetworkClient {
                 .collect();
             Ok(tracks)
         } else {
-            let mut playlist = self
-                .client
-                .query()
-                .music_playlist(&playlist_id)
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to fetch playlist details: {:?}", e))?;
-
-            let _ = playlist.tracks.extend_all(self.client.query()).await;
-
-            let tracks = playlist
-                .tracks
-                .items
-                .into_iter()
-                .map(|track| {
-                    let artist_name = track
-                        .artists
-                        .first()
-                        .map(|a| a.name.clone())
-                        .unwrap_or_else(|| "Unknown Artist".to_string());
-                    TrackInfo {
-                        id: track.id,
-                        title: track.name,
-                        artist: artist_name,
-                        duration_secs: track.duration,
-                    }
-                })
-                .collect();
-            Ok(tracks)
+            match self.client.query().music_playlist(&playlist_id).await {
+                Ok(mut playlist) => {
+                    let _ = playlist.tracks.extend_all(self.client.query()).await;
+                    let tracks = playlist
+                        .tracks
+                        .items
+                        .into_iter()
+                        .map(|track| {
+                            let artist_name = track
+                                .artists
+                                .first()
+                                .map(|a| a.name.clone())
+                                .unwrap_or_else(|| "Unknown Artist".to_string());
+                            TrackInfo {
+                                id: track.id,
+                                title: track.name,
+                                artist: artist_name,
+                                duration_secs: track.duration,
+                            }
+                        })
+                        .collect();
+                    Ok(tracks)
+                }
+                Err(e) => {
+                    log::warn!(
+                        "rustypipe failed to fetch playlist '{}': {:?}. Falling back to yt-dlp...",
+                        playlist_id,
+                        e
+                    );
+                    Self::fetch_playlist_ytdlp(
+                        yt_dlp_path,
+                        browser,
+                        cookies_path,
+                        js_runtime,
+                        playlist_url,
+                    )
+                    .await
+                }
+            }
         };
 
         match res {
@@ -524,5 +627,36 @@ mod tests {
             }
         }
         assert!(album.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_fetch_playlist_ytdlp() {
+        let config = crate::config::Config::new();
+        let yt_dlp = match config.ensure_yt_dlp().await {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let browser = config.get_cookie_browser_arg();
+        let js_runtime = config.get_js_runtime_arg();
+
+        let tracks = NetworkClient::fetch_playlist_ytdlp(
+            &yt_dlp,
+            browser.as_deref(),
+            &config.cookies_path,
+            &js_runtime,
+            "https://www.youtube.com/playlist?list=PLPy6Ka57myt782w17YOhrAI1yXx79u6vC",
+        )
+        .await;
+
+        if let Ok(ref t) = tracks {
+            println!("--- Test Playlist Tracks: {} ---", t.len());
+            for track in t.iter().take(3) {
+                println!(
+                    "  - {} by {} ({:?})",
+                    track.title, track.artist, track.duration_secs
+                );
+            }
+        }
+        assert!(tracks.is_ok(), "Expected yt-dlp playlist fetch to succeed");
     }
 }

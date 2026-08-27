@@ -312,6 +312,28 @@ impl Config {
         }
     }
 
+    pub async fn update_yt_dlp(&self) -> Result<(), anyhow::Error> {
+        let venv_dir = self.db_path.parent().unwrap().join("venv");
+        let (bin_dir_name, pip_name) = if cfg!(windows) {
+            ("Scripts", "pip.exe")
+        } else {
+            ("bin", "pip")
+        };
+        let pip_bin = venv_dir.join(bin_dir_name).join(pip_name);
+        if pip_bin.exists() {
+            println!("  🔄 Updating local yt-dlp dependency...");
+            let status = tokio::process::Command::new(&pip_bin)
+                .args(&["install", "-U", "yt-dlp"])
+                .status()
+                .await?;
+            if status.success() {
+                println!("  ✅ yt-dlp updated successfully!");
+                return Ok(());
+            }
+        }
+        Err(anyhow::anyhow!("Failed to update yt-dlp"))
+    }
+
     pub fn get_discord_settings(&self) -> Option<DiscordSettings> {
         if self.discord_settings_path.exists() {
             let content = std::fs::read_to_string(&self.discord_settings_path).ok()?;

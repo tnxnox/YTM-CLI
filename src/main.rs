@@ -4,6 +4,7 @@ pub mod db;
 pub mod discord;
 pub mod discord_rpc;
 pub mod lyrics;
+pub mod mpris;
 pub mod network;
 pub mod theme;
 
@@ -86,6 +87,20 @@ enum Commands {
         #[arg(short, long)]
         shuffle: bool,
     },
+    /// Play or manage favorite tracks
+    Favorites {
+        /// Play in shuffle mode
+        #[arg(short, long)]
+        shuffle: bool,
+    },
+    /// Play or manage custom local playlists
+    LocalPlaylist {
+        /// Optional name of the playlist to play
+        name: Option<String>,
+        /// Play in shuffle mode
+        #[arg(short, long)]
+        shuffle: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -96,12 +111,30 @@ enum CacheCommands {
     Clear,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepeatMode {
+    Off,
+    Track,
+    Queue,
+}
+
+impl RepeatMode {
+    pub fn next(self) -> Self {
+        match self {
+            RepeatMode::Off => RepeatMode::Track,
+            RepeatMode::Track => RepeatMode::Queue,
+            RepeatMode::Queue => RepeatMode::Off,
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum PlaybackControl {
     Finished,
     Next,
     Prev,
     Quit,
+    Jump(usize),
 }
 
 // ---------------------------------------------------------------------------
@@ -230,6 +263,8 @@ fn draw_progress_bar(
     visualizer: Option<&crate::audio::VisualizerShared>,
     lyrics_state: Option<&LyricsState>,
     show_lyrics: bool,
+    repeat_mode: RepeatMode,
+    is_favorite: bool,
 ) {
     let elapsed_str = format_duration(elapsed);
     let total_str = match total {
@@ -372,10 +407,24 @@ fn draw_progress_bar(
 
     let mut lines_printed = 0;
 
+    let rep_str = match repeat_mode {
+        RepeatMode::Off => "".to_string(),
+        RepeatMode::Track => format!("  {}", theme::style_primary("🔂 [1]")),
+        RepeatMode::Queue => format!("  {}", theme::style_primary("🔁 [All]")),
+    };
+    let fav_str = if is_favorite { "  ❤️" } else { "" };
+
     // Carriage return and clear line for progress bar
     print!(
-        "\r\x1b[K  {}  [ {}{}{} ]  {}  {}",
-        state_styled, filled_styled, thumb_styled, unfilled_styled, time_styled, vol_styled
+        "\r\x1b[K  {}  [ {}{}{} ]  {}  {}{}{}",
+        state_styled,
+        filled_styled,
+        thumb_styled,
+        unfilled_styled,
+        time_styled,
+        vol_styled,
+        rep_str,
+        fav_str
     );
 
     if visualizer.is_some() {
@@ -630,12 +679,16 @@ fn get_user_agent_for_gvs_url(stream_url: &str) -> &'static str {
     let client_upper = client.to_uppercase();
     if client_upper.contains("TV") {
         "Mozilla/5.0 (Chromecast; GoogleTV) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.127 Safari/537.36"
-    } else if client_upper.contains("ANDROID") {
-        "com.google.android.youtube/19.17.34 (Linux; U; Android 14; US) GMT+00:00"
+    } else if client_upper.contains("VISIONOS") {
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15"
+    } else if client_upper.contains("MWEB") {
+        "Mozilla/5.0 (iPad; CPU OS 16_7_10 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1,gzip(gfe)"
     } else if client_upper.contains("IOS") {
-        "com.google.ios.youtube/19.17.34 (iPhone16,2; U; CPU iPhone OS 17_5 like Mac OS X; US)"
+        "com.google.ios.youtube/21.26.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)"
+    } else if client_upper.contains("ANDROID") {
+        "com.google.android.youtube/19.29.37 (Linux; U; Android 11; US) gzip"
     } else {
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
     }
 }
 
@@ -754,6 +807,15 @@ async fn play_progressive_track(
                 .map_err(|e| {
                     log::error!("Progressive download failed to send request: {}", e);
                 })?;
+
+            if !response.status().is_success() {
+                log::error!(
+                    "Progressive download HTTP error {}: {}",
+                    response.status(),
+                    stream_url_clone
+                );
+                return Err(());
+            }
 
             // Read Content-Length
             if let Some(content_len) = response.content_length() {
@@ -944,36 +1006,176 @@ fn is_matching_alternative(original: &TrackInfo, candidate: &TrackInfo) -> bool 
 // Core playback – reused by both subcommands and interactive menu
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, PartialEq, Eq)]
+enum QueueModalResult {
+    Jump(usize),
+    Remove(usize),
+    Cancel,
+}
+
+fn interact_queue_select(tracks: &[TrackInfo], current_idx: usize) -> Result<QueueModalResult> {
+    let mut items = Vec::new();
+    for (i, t) in tracks.iter().enumerate() {
+        let prefix = if i == current_idx {
+            "▶ [NOW]"
+        } else if i < current_idx {
+            "✔ [DONE]"
+        } else {
+            "  [NEXT]"
+        };
+        let dur = t
+            .duration_secs
+            .map(|s| format_duration(Duration::from_secs(s as u64)))
+            .unwrap_or_else(|| "--:--".to_string());
+        items.push(format!(
+            "{} {:2}. {:<32} - {:<18} ({})",
+            prefix,
+            i + 1,
+            truncate(&t.title, 32),
+            truncate(&t.artist, 18),
+            dur
+        ));
+    }
+    items.push("🔙 Back to Player".to_string());
+
+    let selection = dialoguer::Select::with_theme(&theme::get_dialoguer_theme())
+        .with_prompt(format!(
+            "Live Queue ({} tracks | Currently playing: #{})",
+            tracks.len(),
+            current_idx + 1
+        ))
+        .default(current_idx)
+        .items(&items)
+        .interact_opt()?;
+
+    match selection {
+        Some(idx) if idx < tracks.len() => {
+            if idx == current_idx {
+                Ok(QueueModalResult::Cancel)
+            } else {
+                let action_choices =
+                    vec!["▶ Jump to this track", "🗑 Remove from queue", "🔙 Cancel"];
+                let act = dialoguer::Select::with_theme(&theme::get_dialoguer_theme())
+                    .with_prompt(format!("Action for '{}'", truncate(&tracks[idx].title, 35)))
+                    .default(0)
+                    .items(&action_choices)
+                    .interact()?;
+                match act {
+                    0 => Ok(QueueModalResult::Jump(idx)),
+                    1 => Ok(QueueModalResult::Remove(idx)),
+                    _ => Ok(QueueModalResult::Cancel),
+                }
+            }
+        }
+        _ => Ok(QueueModalResult::Cancel),
+    }
+}
+
+async fn prompt_add_to_playlist(db: &Db, track: &TrackInfo) -> Result<()> {
+    let playlists = db.list_local_playlists()?;
+    let mut options = Vec::new();
+    for p in &playlists {
+        options.push(format!("📁 {} ({} tracks)", p.name, p.track_count));
+    }
+    options.push("➕ Create New Playlist".to_string());
+    options.push("🔙 Cancel".to_string());
+
+    let selection = dialoguer::Select::with_theme(&theme::get_dialoguer_theme())
+        .with_prompt(format!(
+            "Add '{}' to Local Playlist",
+            truncate(&track.title, 30)
+        ))
+        .default(0)
+        .items(&options)
+        .interact_opt()?;
+
+    match selection {
+        Some(idx) if idx < playlists.len() => {
+            let pl = &playlists[idx];
+            let dur = track.duration_secs.unwrap_or(0);
+            db.add_track_to_local_playlist(pl.id, &track.id, &track.title, &track.artist, dur)?;
+            println!(
+                "\n  ✅ Added '{}' to playlist '{}'!",
+                theme::style_primary(&track.title),
+                theme::style_accent(&pl.name)
+            );
+            std::io::stdout().flush().ok();
+            tokio::time::sleep(Duration::from_millis(1000)).await;
+        }
+        Some(idx) if idx == playlists.len() => {
+            let name: String = dialoguer::Input::with_theme(&theme::get_dialoguer_theme())
+                .with_prompt("New Playlist Name")
+                .interact_text()?;
+            let name = name.trim();
+            if !name.is_empty() {
+                let pl_id = db.create_local_playlist(name)?;
+                let dur = track.duration_secs.unwrap_or(0);
+                db.add_track_to_local_playlist(pl_id, &track.id, &track.title, &track.artist, dur)?;
+                println!(
+                    "\n  ✅ Created playlist '{}' and added '{}'!",
+                    theme::style_accent(name),
+                    theme::style_primary(&track.title)
+                );
+                std::io::stdout().flush().ok();
+                tokio::time::sleep(Duration::from_millis(1000)).await;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn print_track_header(
+    track: &TrackInfo,
+    queue_info: Option<(usize, usize)>,
+    is_cached: bool,
+    is_discord: bool,
+) {
+    let track_name = format!("{} - {}", track.title, track.artist);
+    let mode_str = if is_discord {
+        " (Discord Mode)"
+    } else if is_cached {
+        " (cached)"
+    } else {
+        ""
+    };
+    if let Some((idx, total)) = queue_info {
+        println!(
+            "  💿 [{}/{}] Playing{}: {}",
+            idx + 1,
+            total,
+            mode_str,
+            theme::style_primary(&track_name)
+        );
+    } else {
+        println!(
+            "  💿 Playing{}: {}",
+            mode_str,
+            theme::style_primary(&track_name)
+        );
+    }
+}
+
 async fn play_track(
     track: &TrackInfo,
     config: &Config,
     db: &Db,
-    queue_info: Option<(usize, usize)>,
+    mut queue_context: Option<(&mut Vec<TrackInfo>, usize)>,
     current_volume: &mut f32,
+    previous_volume: &mut f32,
+    repeat_mode: &mut RepeatMode,
     debug: bool,
 ) -> Result<PlaybackControl> {
     let video_id = &track.id;
     let title = &track.title;
     let artist = &track.artist;
     let total_duration = track.duration_secs.map(|d| Duration::from_secs(d as u64));
+    let queue_info = queue_context.as_ref().map(|(v, i)| (*i, v.len()));
 
     if let Some(discord) = config.get_discord_settings() {
         if discord.enabled {
             clear_screen();
-            let track_name = format!("{} - {}", title, artist);
-            if let Some((idx, total)) = queue_info {
-                println!(
-                    "  💿 [{}/{}] Playing (Discord Mode): {}",
-                    idx + 1,
-                    total,
-                    theme::style_primary(&track_name)
-                );
-            } else {
-                println!(
-                    "  💿 Playing (Discord Mode): {}",
-                    theme::style_primary(&track_name)
-                );
-            }
+            print_track_header(track, queue_info, false, true);
 
             let controls_help = if queue_info.is_some() {
                 "  🎮 Controls: [Space] Play/Pause  [N] Skip  [P] Prev  [Q] Stop/Back"
@@ -1013,7 +1215,17 @@ async fn play_track(
                         elapsed += delta;
                     }
 
-                    draw_progress_bar(elapsed, total_duration, 1.0, is_paused, None, None, false);
+                    draw_progress_bar(
+                        elapsed,
+                        total_duration,
+                        1.0,
+                        is_paused,
+                        None,
+                        None,
+                        false,
+                        *repeat_mode,
+                        false,
+                    );
 
                     if event::poll(Duration::from_millis(100))? {
                         if let Event::Key(key_event) = event::read()? {
@@ -1083,6 +1295,14 @@ async fn play_track(
             return Ok(control);
         }
     }
+
+    let (mpris_tx, mut mpris_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::mpris::MprisCommand>();
+    let mpris = crate::mpris::MprisManager::start(mpris_tx).await;
+    mpris
+        .update_metadata(title, artist, video_id, track.duration_secs)
+        .await;
+    mpris.set_playback_status(false).await;
 
     let m4a_file = config.cache_dir.join(format!("{}.m4a", video_id));
 
@@ -1241,6 +1461,7 @@ async fn play_track(
     };
 
     db.add_history(video_id, title, artist)?;
+    let mut is_fav = db.is_favorite(video_id).unwrap_or(false);
 
     let lyrics_enabled = db
         .get_setting("lyrics_enabled")
@@ -1274,19 +1495,10 @@ async fn play_track(
 
     let mut show_lyrics = lyrics_enabled;
 
-    let controls_help = match (queue_info.is_some(), lyrics_enabled) {
-        (true, true) => {
-            "  🎮 Controls: [Space] Play/Pause  [←/→] Seek  [↑/↓] Volume  [L] Lyrics  [N] Next  [P] Prev  [Q] Stop/Back"
-        }
-        (true, false) => {
-            "  🎮 Controls: [Space] Play/Pause  [←/→] Seek  [↑/↓] Volume  [N] Next  [P] Prev  [Q] Stop/Back"
-        }
-        (false, true) => {
-            "  🎮 Controls: [Space] Play/Pause  [←/→] Seek  [↑/↓] Volume  [L] Lyrics  [Q] Stop/Back"
-        }
-        (false, false) => {
-            "  🎮 Controls: [Space] Play/Pause  [←/→] Seek  [↑/↓] Volume  [Q] Stop/Back"
-        }
+    let controls_help = if queue_info.is_some() {
+        "  🎮 [Space] Play/Pause [←/→] Seek [↑/↓] Vol [M] Mute [N] Next [P] Prev [R] Repeat [S] Shuffle [Tab] Queue [F] Fav [A] Add [L] Lyrics [Q] Stop"
+    } else {
+        "  🎮 [Space] Play/Pause [←/→] Seek [↑/↓] Vol [M] Mute [R] Repeat [F] Fav [A] Add [L] Lyrics [Q] Stop"
     };
     println!("{}", theme::style_dim(controls_help));
 
@@ -1300,6 +1512,84 @@ async fn play_track(
         while !sink.empty() {
             let elapsed = Duration::from_millis(visualizer_shared.get_elapsed_ms());
 
+            // Process any incoming MPRIS commands
+            while let Ok(cmd) = mpris_rx.try_recv() {
+                match cmd {
+                    crate::mpris::MprisCommand::Play => {
+                        if sink.is_paused() {
+                            sink.play();
+                            mpris.set_playback_status(false).await;
+                            rpc.update(track, elapsed, false);
+                        }
+                    }
+                    crate::mpris::MprisCommand::Pause => {
+                        if !sink.is_paused() {
+                            sink.pause();
+                            mpris.set_playback_status(true).await;
+                            rpc.update(track, elapsed, true);
+                        }
+                    }
+                    crate::mpris::MprisCommand::PlayPause => {
+                        if sink.is_paused() {
+                            sink.play();
+                            mpris.set_playback_status(false).await;
+                            rpc.update(track, elapsed, false);
+                        } else {
+                            sink.pause();
+                            mpris.set_playback_status(true).await;
+                            rpc.update(track, elapsed, true);
+                        }
+                    }
+                    crate::mpris::MprisCommand::Next => {
+                        if queue_info.is_some() {
+                            sink.stop();
+                            control = PlaybackControl::Next;
+                            break;
+                        }
+                    }
+                    crate::mpris::MprisCommand::Previous => {
+                        if queue_info.is_some() {
+                            sink.stop();
+                            control = PlaybackControl::Prev;
+                            break;
+                        }
+                    }
+                    crate::mpris::MprisCommand::Stop => {
+                        sink.stop();
+                        control = PlaybackControl::Quit;
+                        break;
+                    }
+                    crate::mpris::MprisCommand::Seek(micros) => {
+                        let secs = micros as f64 / 1_000_000.0;
+                        let new_pos = if secs < 0.0 {
+                            elapsed.saturating_sub(Duration::from_secs_f64(-secs))
+                        } else {
+                            elapsed + Duration::from_secs_f64(secs)
+                        };
+                        if sink.try_seek(new_pos).is_ok() {
+                            visualizer_shared.set_elapsed_ms(new_pos.as_millis() as u64);
+                            rpc.update(track, new_pos, sink.is_paused());
+                        }
+                    }
+                    crate::mpris::MprisCommand::SetPosition(micros) => {
+                        let target = Duration::from_micros(micros as u64);
+                        if sink.try_seek(target).is_ok() {
+                            visualizer_shared.set_elapsed_ms(target.as_millis() as u64);
+                            rpc.update(track, target, sink.is_paused());
+                        }
+                    }
+                    crate::mpris::MprisCommand::SetVolume(vol) => {
+                        let vol = (vol as f32).clamp(0.0, 2.0);
+                        sink.set_volume(vol);
+                        *current_volume = vol;
+                    }
+                }
+            }
+
+            if control != PlaybackControl::Finished {
+                break;
+            }
+
             let current_lyrics_state = lyrics_state
                 .as_ref()
                 .and_then(|s| s.lock().ok().map(|g| g.clone()));
@@ -1312,6 +1602,8 @@ async fn play_track(
                 Some(&visualizer_shared),
                 current_lyrics_state.as_ref(),
                 show_lyrics,
+                *repeat_mode,
+                is_fav,
             );
 
             if event::poll(Duration::from_millis(60))? {
@@ -1323,10 +1615,76 @@ async fn play_track(
                             KeyCode::Char(' ') => {
                                 if sink.is_paused() {
                                     sink.play();
+                                    mpris.set_playback_status(false).await;
                                     rpc.update(track, elapsed, false);
                                 } else {
                                     sink.pause();
+                                    mpris.set_playback_status(true).await;
                                     rpc.update(track, elapsed, true);
+                                }
+                            }
+                            KeyCode::Char('m') | KeyCode::Char('M') => {
+                                if *current_volume > 0.001 {
+                                    *previous_volume = *current_volume;
+                                    *current_volume = 0.0;
+                                    sink.set_volume(0.0);
+                                } else {
+                                    *current_volume = (*previous_volume).max(0.1);
+                                    sink.set_volume(*current_volume);
+                                }
+                            }
+                            KeyCode::Char('r') | KeyCode::Char('R') => {
+                                *repeat_mode = repeat_mode.next();
+                            }
+                            KeyCode::Char('s') | KeyCode::Char('S') => {
+                                if let Some((ref mut all_tracks, curr_idx)) = queue_context {
+                                    if curr_idx + 1 < all_tracks.len() {
+                                        shuffle_tracks(&mut all_tracks[curr_idx + 1..]);
+                                    }
+                                }
+                            }
+                            KeyCode::Char('f') | KeyCode::Char('F') => {
+                                let dur_u32 = track.duration_secs.unwrap_or(0);
+                                if is_fav {
+                                    if db.remove_favorite(video_id).is_ok() {
+                                        is_fav = false;
+                                    }
+                                } else {
+                                    if db.add_favorite(video_id, title, artist, dur_u32).is_ok() {
+                                        is_fav = true;
+                                    }
+                                }
+                            }
+                            KeyCode::Char('a') | KeyCode::Char('A') => {
+                                disable_raw_mode().ok();
+                                prompt_add_to_playlist(db, track).await.ok();
+                                enable_raw_mode().ok();
+                                clear_screen();
+                                print_track_header(track, queue_info, use_cache, false);
+                                println!("{}", theme::style_dim(controls_help));
+                            }
+                            KeyCode::Tab => {
+                                if let Some((ref mut all_tracks, curr_idx)) = queue_context {
+                                    disable_raw_mode().ok();
+                                    let queue_res = interact_queue_select(all_tracks, curr_idx);
+                                    enable_raw_mode().ok();
+                                    clear_screen();
+                                    print_track_header(track, queue_info, use_cache, false);
+                                    println!("{}", theme::style_dim(controls_help));
+
+                                    match queue_res {
+                                        Ok(QueueModalResult::Jump(target_idx)) => {
+                                            sink.stop();
+                                            control = PlaybackControl::Jump(target_idx);
+                                            break;
+                                        }
+                                        Ok(QueueModalResult::Remove(remove_idx)) => {
+                                            if remove_idx < all_tracks.len() {
+                                                all_tracks.remove(remove_idx);
+                                            }
+                                        }
+                                        _ => {}
+                                    }
                                 }
                             }
                             KeyCode::Char('l') | KeyCode::Char('L') => {
@@ -1423,6 +1781,7 @@ async fn play_track(
         print!("\x1b[{}A\r\x1b[K", total_lines_to_clear);
         std::io::stdout().flush().ok();
         rpc.clear();
+        mpris.set_playback_stopped().await;
     }
 
     // Clean up / Register progressive download
@@ -1608,8 +1967,16 @@ async fn play_queue(
     let mut autoplay_ctoken = autoplay_ctoken;
     let mut idx = start_idx;
     let mut active_prefetch: Option<(usize, tokio::task::JoinHandle<()>)> = None;
+    let mut repeat_mode = RepeatMode::Off;
+    let mut previous_volume = *current_volume;
 
     loop {
+        if idx >= tracks.len() {
+            println!("\n  Queue finished.");
+            press_enter_to_continue();
+            break;
+        }
+
         // Fetch more tracks if we are near the end of the autoplay queue
         if let Some((ctoken, endpoint)) = autoplay_ctoken.clone() {
             if idx + 5 >= tracks.len() {
@@ -1654,33 +2021,65 @@ async fn play_queue(
             active_prefetch = Some((idx + 1, handle));
         }
 
-        let track = &tracks[idx];
+        let track = tracks[idx].clone();
         let control_res = play_track(
-            track,
+            &track,
             config,
             db,
-            Some((idx, tracks.len())),
+            Some((&mut tracks, idx)),
             current_volume,
+            &mut previous_volume,
+            &mut repeat_mode,
             debug,
         )
         .await;
 
         match control_res {
             Ok(control) => match control {
-                PlaybackControl::Finished | PlaybackControl::Next => {
-                    idx += 1;
-                    if idx >= tracks.len() {
-                        println!("\n  Queue finished.");
-                        press_enter_to_continue();
-                        break;
+                PlaybackControl::Finished => match repeat_mode {
+                    RepeatMode::Track => {
+                        // Keep idx unchanged to replay this track
+                    }
+                    RepeatMode::Queue => {
+                        idx += 1;
+                        if idx >= tracks.len() {
+                            idx = 0;
+                        }
+                    }
+                    RepeatMode::Off => {
+                        idx += 1;
+                        if idx >= tracks.len() {
+                            println!("\n  Queue finished.");
+                            press_enter_to_continue();
+                            break;
+                        }
+                    }
+                },
+                PlaybackControl::Next => {
+                    if repeat_mode == RepeatMode::Queue && idx + 1 >= tracks.len() {
+                        idx = 0;
+                    } else {
+                        idx += 1;
+                        if idx >= tracks.len() {
+                            println!("\n  Queue finished.");
+                            press_enter_to_continue();
+                            break;
+                        }
                     }
                 }
                 PlaybackControl::Prev => {
-                    if idx > 0 {
+                    if repeat_mode == RepeatMode::Queue && idx == 0 {
+                        idx = tracks.len().saturating_sub(1);
+                    } else if idx > 0 {
                         idx -= 1;
                     } else {
                         println!("\n  Already at the first track.");
                         press_enter_to_continue();
+                    }
+                }
+                PlaybackControl::Jump(target_idx) => {
+                    if target_idx < tracks.len() {
+                        idx = target_idx;
                     }
                 }
                 PlaybackControl::Quit => {
@@ -2966,6 +3365,388 @@ async fn run_discord_menu(config: &Config) -> Result<()> {
     Ok(())
 }
 
+async fn run_favorites_menu(
+    config: &Config,
+    db: &Db,
+    client: &NetworkClient,
+    current_volume: &mut f32,
+    debug: bool,
+) -> Result<()> {
+    loop {
+        clear_screen();
+        let favs = db.list_favorites()?;
+        if favs.is_empty() {
+            println!(
+                "\n  ❤️  {}",
+                theme::style_primary("Favorites / Liked Songs")
+            );
+            println!("\n  You don't have any favorite songs yet!");
+            println!(
+                "  Press {} during playback to add any song to your favorites.",
+                theme::style_accent("[F]")
+            );
+            press_enter_to_continue();
+            break;
+        }
+
+        println!(
+            "\n  ❤️  {} ({} songs)\n",
+            theme::style_primary("Favorites / Liked Songs"),
+            favs.len()
+        );
+
+        let choices = vec![
+            "▶ Play all favorites",
+            "🔀 Shuffle and play favorites",
+            "📋 View / Manage favorites table",
+            "🔙 Back to Main Menu",
+        ];
+
+        let selection = dialoguer::Select::with_theme(&theme::get_dialoguer_theme())
+            .with_prompt("Favorites Menu")
+            .default(0)
+            .items(&choices)
+            .interact()?;
+
+        match selection {
+            0 => {
+                let tracks: Vec<TrackInfo> = favs
+                    .into_iter()
+                    .map(|f| TrackInfo {
+                        id: f.video_id,
+                        title: f.title,
+                        artist: f.artist,
+                        duration_secs: Some(f.duration_secs),
+                    })
+                    .collect();
+                play_queue(tracks, 0, config, db, client, None, current_volume, debug).await?;
+            }
+            1 => {
+                let mut tracks: Vec<TrackInfo> = favs
+                    .into_iter()
+                    .map(|f| TrackInfo {
+                        id: f.video_id,
+                        title: f.title,
+                        artist: f.artist,
+                        duration_secs: Some(f.duration_secs),
+                    })
+                    .collect();
+                shuffle_tracks(&mut tracks);
+                play_queue(tracks, 0, config, db, client, None, current_volume, debug).await?;
+            }
+            2 => {
+                let track_infos: Vec<TrackInfo> = favs
+                    .iter()
+                    .map(|f| TrackInfo {
+                        id: f.video_id.clone(),
+                        title: f.title.clone(),
+                        artist: f.artist.clone(),
+                        duration_secs: Some(f.duration_secs),
+                    })
+                    .collect();
+                if let Some(selected_idx) = interact_table_select(
+                    "Select a favorite song",
+                    vec!["#", "Title", "Artist", "Duration"],
+                    &track_infos,
+                    "Back to Favorites Menu",
+                )? {
+                    let chosen = &favs[selected_idx];
+                    let act_choices = vec![
+                        "▶ Play starting from here",
+                        "💔 Remove from Favorites",
+                        "🔙 Cancel",
+                    ];
+                    let act = dialoguer::Select::with_theme(&theme::get_dialoguer_theme())
+                        .with_prompt(format!("Options for '{}'", chosen.title))
+                        .default(0)
+                        .items(&act_choices)
+                        .interact()?;
+                    if act == 0 {
+                        let tracks: Vec<TrackInfo> = favs
+                            .into_iter()
+                            .map(|f| TrackInfo {
+                                id: f.video_id,
+                                title: f.title,
+                                artist: f.artist,
+                                duration_secs: Some(f.duration_secs),
+                            })
+                            .collect();
+                        play_queue(
+                            tracks,
+                            selected_idx,
+                            config,
+                            db,
+                            client,
+                            None,
+                            current_volume,
+                            debug,
+                        )
+                        .await?;
+                    } else if act == 1 {
+                        db.remove_favorite(&chosen.video_id)?;
+                        println!(
+                            "  💔 Removed '{}' from favorites.",
+                            theme::style_primary(&chosen.title)
+                        );
+                        std::io::stdout().flush().ok();
+                        tokio::time::sleep(Duration::from_millis(800)).await;
+                    }
+                }
+            }
+            _ => break,
+        }
+    }
+    Ok(())
+}
+
+async fn run_local_playlists_menu(
+    config: &Config,
+    db: &Db,
+    client: &NetworkClient,
+    current_volume: &mut f32,
+    debug: bool,
+) -> Result<()> {
+    loop {
+        clear_screen();
+        let playlists = db.list_local_playlists()?;
+
+        println!(
+            "\n  📁  {} ({} playlists)\n",
+            theme::style_primary("Custom Local Playlists"),
+            playlists.len()
+        );
+
+        let mut choices = Vec::new();
+        for p in &playlists {
+            choices.push(format!("📁 {} ({} tracks)", p.name, p.track_count));
+        }
+        choices.push("➕ Create New Playlist".to_string());
+        choices.push("🔙 Back to Main Menu".to_string());
+
+        let selection = dialoguer::Select::with_theme(&theme::get_dialoguer_theme())
+            .with_prompt("Select a Playlist")
+            .default(0)
+            .items(&choices)
+            .interact()?;
+
+        if selection < playlists.len() {
+            let pl = &playlists[selection];
+            let playlist_id = pl.id;
+            let playlist_name = pl.name.clone();
+
+            loop {
+                clear_screen();
+                let pl_tracks = db.get_local_playlist_tracks(playlist_id)?;
+                println!(
+                    "\n  📁 Playlist: {} ({} tracks)\n",
+                    theme::style_accent(&playlist_name),
+                    pl_tracks.len()
+                );
+
+                let pl_choices = vec![
+                    "▶ Play playlist",
+                    "🔀 Shuffle and play",
+                    "➕ Search & Add tracks",
+                    "📋 View / Remove tracks",
+                    "🗑 Delete playlist",
+                    "🔙 Back to Playlists",
+                ];
+
+                let pl_act = dialoguer::Select::with_theme(&theme::get_dialoguer_theme())
+                    .with_prompt("Playlist Options")
+                    .default(0)
+                    .items(&pl_choices)
+                    .interact()?;
+
+                match pl_act {
+                    0 => {
+                        if pl_tracks.is_empty() {
+                            println!("\n  Playlist is empty! Add tracks before playing.");
+                            press_enter_to_continue();
+                            continue;
+                        }
+                        let tracks: Vec<TrackInfo> = pl_tracks
+                            .into_iter()
+                            .map(|t| TrackInfo {
+                                id: t.video_id,
+                                title: t.title,
+                                artist: t.artist,
+                                duration_secs: Some(t.duration_secs),
+                            })
+                            .collect();
+                        play_queue(tracks, 0, config, db, client, None, current_volume, debug)
+                            .await?;
+                    }
+                    1 => {
+                        if pl_tracks.is_empty() {
+                            println!("\n  Playlist is empty! Add tracks before playing.");
+                            press_enter_to_continue();
+                            continue;
+                        }
+                        let mut tracks: Vec<TrackInfo> = pl_tracks
+                            .into_iter()
+                            .map(|t| TrackInfo {
+                                id: t.video_id,
+                                title: t.title,
+                                artist: t.artist,
+                                duration_secs: Some(t.duration_secs),
+                            })
+                            .collect();
+                        shuffle_tracks(&mut tracks);
+                        play_queue(tracks, 0, config, db, client, None, current_volume, debug)
+                            .await?;
+                    }
+                    2 => {
+                        let query: String =
+                            dialoguer::Input::with_theme(&theme::get_dialoguer_theme())
+                                .with_prompt("Search song to add")
+                                .interact_text()?;
+                        let query = query.trim();
+                        if !query.is_empty() {
+                            println!("  🔍 Searching for '{}'...", theme::style_primary(query));
+                            match client.search(query).await {
+                                Ok(results) => {
+                                    if results.is_empty() {
+                                        println!("  No tracks found.");
+                                        press_enter_to_continue();
+                                    } else {
+                                        if let Some(idx) = interact_table_select(
+                                            "Select a track to add",
+                                            vec!["#", "Title", "Artist", "Duration"],
+                                            &results,
+                                            "Cancel",
+                                        )? {
+                                            let chosen = &results[idx];
+                                            let dur = chosen.duration_secs.unwrap_or(0);
+                                            db.add_track_to_local_playlist(
+                                                playlist_id,
+                                                &chosen.id,
+                                                &chosen.title,
+                                                &chosen.artist,
+                                                dur,
+                                            )?;
+                                            println!(
+                                                "\n  ✅ Added '{}' to playlist '{}'!",
+                                                theme::style_primary(&chosen.title),
+                                                theme::style_accent(&playlist_name)
+                                            );
+                                            std::io::stdout().flush().ok();
+                                            tokio::time::sleep(Duration::from_millis(800)).await;
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    println!("  ❌ Search error: {}", e);
+                                    press_enter_to_continue();
+                                }
+                            }
+                        }
+                    }
+                    3 => {
+                        if pl_tracks.is_empty() {
+                            println!("\n  Playlist is empty.");
+                            press_enter_to_continue();
+                            continue;
+                        }
+                        let track_infos: Vec<TrackInfo> = pl_tracks
+                            .iter()
+                            .map(|t| TrackInfo {
+                                id: t.video_id.clone(),
+                                title: t.title.clone(),
+                                artist: t.artist.clone(),
+                                duration_secs: Some(t.duration_secs),
+                            })
+                            .collect();
+                        if let Some(sel_idx) = interact_table_select(
+                            "Select a track",
+                            vec!["#", "Title", "Artist", "Duration"],
+                            &track_infos,
+                            "Back to Playlist Options",
+                        )? {
+                            let track_entry = &pl_tracks[sel_idx];
+                            let track_act_choices =
+                                vec!["▶ Play from here", "🗑 Remove from Playlist", "🔙 Cancel"];
+                            let tact = dialoguer::Select::with_theme(&theme::get_dialoguer_theme())
+                                .with_prompt(format!("Options for '{}'", track_entry.title))
+                                .default(0)
+                                .items(&track_act_choices)
+                                .interact()?;
+                            if tact == 0 {
+                                let tracks: Vec<TrackInfo> = pl_tracks
+                                    .into_iter()
+                                    .map(|t| TrackInfo {
+                                        id: t.video_id,
+                                        title: t.title,
+                                        artist: t.artist,
+                                        duration_secs: Some(t.duration_secs),
+                                    })
+                                    .collect();
+                                play_queue(
+                                    tracks,
+                                    sel_idx,
+                                    config,
+                                    db,
+                                    client,
+                                    None,
+                                    current_volume,
+                                    debug,
+                                )
+                                .await?;
+                            } else if tact == 1 {
+                                db.remove_track_from_local_playlist(track_entry.id)?;
+                                println!("  🗑 Removed track from playlist.");
+                                std::io::stdout().flush().ok();
+                                tokio::time::sleep(Duration::from_millis(800)).await;
+                            }
+                        }
+                    }
+                    4 => {
+                        let confirm = dialoguer::Confirm::with_theme(&theme::get_dialoguer_theme())
+                            .with_prompt(format!(
+                                "Are you sure you want to delete playlist '{}'?",
+                                playlist_name
+                            ))
+                            .default(false)
+                            .interact()?;
+                        if confirm {
+                            db.delete_local_playlist(playlist_id)?;
+                            println!(
+                                "\n  🗑 Deleted playlist '{}'.",
+                                theme::style_accent(&playlist_name)
+                            );
+                            std::io::stdout().flush().ok();
+                            tokio::time::sleep(Duration::from_millis(800)).await;
+                            break;
+                        }
+                    }
+                    _ => break,
+                }
+            }
+        } else if selection == playlists.len() {
+            let name: String = dialoguer::Input::with_theme(&theme::get_dialoguer_theme())
+                .with_prompt("New Playlist Name")
+                .interact_text()?;
+            let name = name.trim();
+            if !name.is_empty() {
+                match db.create_local_playlist(name) {
+                    Ok(_) => {
+                        println!("\n  ✅ Created playlist '{}'!", theme::style_accent(name));
+                        std::io::stdout().flush().ok();
+                        tokio::time::sleep(Duration::from_millis(800)).await;
+                    }
+                    Err(e) => {
+                        println!("\n  ❌ Failed to create playlist: {}", e);
+                        press_enter_to_continue();
+                    }
+                }
+            }
+        } else {
+            break;
+        }
+    }
+    Ok(())
+}
+
 async fn run_interactive_menu(
     config: &Config,
     db: &Db,
@@ -3001,13 +3782,15 @@ async fn run_interactive_menu(
         let mut selections = vec![
             "🔍 Search and Play (Tracks)".to_string(),
             "💿 Search Albums".to_string(),
+            "❤️  Favorites / Liked Songs".to_string(),
+            "📁 Local Playlists".to_string(),
             "📜 Playback History".to_string(),
             "💾 Cache Management".to_string(),
             format!("🎤 Lyrics Engine (Currently: {})", lyrics_status),
             format!("🤖 Discord Selfbot Mode (Currently: {})", discord_status),
         ];
         if logged_in {
-            selections.push("🎵 My Playlists".to_string());
+            selections.push("🎵 My YouTube Playlists".to_string());
             selections.push("🔑 Logout".to_string());
         } else {
             selections.push("🔑 Login".to_string());
@@ -3023,9 +3806,11 @@ async fn run_interactive_menu(
         match selection {
             0 => run_search_and_play(config, db, client, current_volume, debug).await?,
             1 => run_search_albums_and_play(config, db, client, current_volume, debug).await?,
-            2 => run_history(config, db, client, current_volume, debug).await?,
-            3 => run_cache_menu(config, db).await?,
-            4 => {
+            2 => run_favorites_menu(config, db, client, current_volume, debug).await?,
+            3 => run_local_playlists_menu(config, db, client, current_volume, debug).await?,
+            4 => run_history(config, db, client, current_volume, debug).await?,
+            5 => run_cache_menu(config, db).await?,
+            6 => {
                 let new_val = if lyrics_enabled { "false" } else { "true" };
                 db.set_setting("lyrics_enabled", new_val)?;
                 if new_val == "true" {
@@ -3035,15 +3820,15 @@ async fn run_interactive_menu(
                 }
                 press_enter_to_continue();
             }
-            5 => run_discord_menu(config).await?,
-            6 => {
+            7 => run_discord_menu(config).await?,
+            8 => {
                 if logged_in {
                     run_library_playlists(config, db, client, current_volume, debug).await?;
                 } else {
                     run_login_flow(config).await?;
                 }
             }
-            7 => {
+            9 => {
                 if logged_in {
                     config.logout()?;
                     println!("  ✨ Logged out successfully.");
@@ -3053,7 +3838,7 @@ async fn run_interactive_menu(
                     break;
                 }
             }
-            8 => {
+            10 => {
                 println!("  Goodbye! 👋");
                 break;
             }
@@ -3162,6 +3947,80 @@ async fn main() -> Result<()> {
                 debug,
             )
             .await?;
+        }
+        Some(Commands::Favorites { shuffle }) => {
+            let favs = db.list_favorites()?;
+            if favs.is_empty() {
+                println!(
+                    "No favorite tracks found. Press [F] during playback to add songs to favorites."
+                );
+                return Ok(());
+            }
+            let mut tracks: Vec<TrackInfo> = favs
+                .into_iter()
+                .map(|f| TrackInfo {
+                    id: f.video_id,
+                    title: f.title,
+                    artist: f.artist,
+                    duration_secs: Some(f.duration_secs),
+                })
+                .collect();
+            if shuffle {
+                shuffle_tracks(&mut tracks);
+            }
+            play_queue(
+                tracks,
+                0,
+                &config,
+                &db,
+                &client,
+                None,
+                &mut current_volume,
+                debug,
+            )
+            .await?;
+        }
+        Some(Commands::LocalPlaylist { name, shuffle }) => {
+            if let Some(ref pl_name) = name {
+                let playlists = db.list_local_playlists()?;
+                let found = playlists
+                    .into_iter()
+                    .find(|p| p.name.eq_ignore_ascii_case(pl_name));
+                if let Some(pl) = found {
+                    let pl_tracks = db.get_local_playlist_tracks(pl.id)?;
+                    if pl_tracks.is_empty() {
+                        println!("Local playlist '{}' is empty.", pl.name);
+                        return Ok(());
+                    }
+                    let mut tracks: Vec<TrackInfo> = pl_tracks
+                        .into_iter()
+                        .map(|t| TrackInfo {
+                            id: t.video_id,
+                            title: t.title,
+                            artist: t.artist,
+                            duration_secs: Some(t.duration_secs),
+                        })
+                        .collect();
+                    if shuffle {
+                        shuffle_tracks(&mut tracks);
+                    }
+                    play_queue(
+                        tracks,
+                        0,
+                        &config,
+                        &db,
+                        &client,
+                        None,
+                        &mut current_volume,
+                        debug,
+                    )
+                    .await?;
+                } else {
+                    println!("Local playlist '{}' not found.", pl_name);
+                }
+            } else {
+                run_local_playlists_menu(&config, &db, &client, &mut current_volume, debug).await?;
+            }
         }
         Some(Commands::Search { query }) => {
             println!("Searching for '{}'...", query);
