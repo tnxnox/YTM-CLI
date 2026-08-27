@@ -1131,29 +1131,87 @@ fn print_track_header(
     is_cached: bool,
     is_discord: bool,
 ) {
-    let track_name = format!("{} - {}", track.title, track.artist);
-    let mode_str = if is_discord {
-        " (Discord Mode)"
+    let mode_badge = if is_discord {
+        format!(" {}", theme::style_dim("[Discord]"))
     } else if is_cached {
-        " (cached)"
+        format!(" {}", theme::style_dim("[Cached]"))
     } else {
-        ""
+        "".to_string()
     };
-    if let Some((idx, total)) = queue_info {
-        println!(
-            "  💿 [{}/{}] Playing{}: {}",
-            idx + 1,
-            total,
-            mode_str,
-            theme::style_primary(&track_name)
-        );
-    } else {
-        println!(
-            "  💿 Playing{}: {}",
-            mode_str,
-            theme::style_primary(&track_name)
-        );
+
+    let queue_badge = match queue_info {
+        Some((idx, total)) => format!(
+            "  {}",
+            theme::style_dim(&format!("[{}/{}]", idx + 1, total))
+        ),
+        None => "".to_string(),
+    };
+
+    let song_info = format!("{} — {}", track.title, track.artist);
+
+    println!(
+        "\n  💿 Playing{}: {}{}",
+        mode_badge,
+        theme::style_primary(&song_info),
+        queue_badge
+    );
+}
+
+fn show_playback_help_modal() -> Result<()> {
+    clear_screen();
+    println!(
+        "\n  {}\n",
+        theme::style_primary("── ⌨️  Keyboard Shortcuts Cheatsheet ──")
+    );
+
+    let mut table = comfy_table::Table::new();
+    table.load_preset(comfy_table::presets::UTF8_FULL);
+    table.set_header(vec![
+        comfy_table::Cell::new("Category").fg(comfy_table::Color::Cyan),
+        comfy_table::Cell::new("Key").fg(comfy_table::Color::Yellow),
+        comfy_table::Cell::new("Action").fg(comfy_table::Color::White),
+    ]);
+
+    let shortcuts = vec![
+        ("Playback", "[Space]", "Play / Pause playback"),
+        (
+            "Playback",
+            "[←] / [→]",
+            "Seek backward / forward (5 seconds)",
+        ),
+        ("Playback", "[↑] / [↓]", "Increase / decrease volume"),
+        ("Playback", "[M]", "Toggle mute / restore volume"),
+        ("Playback", "[R]", "Cycle repeat mode (Off ➔ Track ➔ Queue)"),
+        ("Navigation", "[N]", "Skip to next track in queue"),
+        ("Navigation", "[P]", "Go back to previous track in queue"),
+        ("Navigation", "[S]", "Shuffle upcoming tracks in queue"),
+        (
+            "Navigation",
+            "[Tab]",
+            "Open live queue viewer & jump to track",
+        ),
+        ("Library", "[F]", "Toggle favorite / liked song (❤️)"),
+        ("Library", "[A]", "Add current track to a local playlist"),
+        ("Features", "[L]", "Toggle real-time synced lyrics display"),
+        (
+            "General",
+            "[?] / [H]",
+            "Show this keyboard shortcuts cheatsheet",
+        ),
+        ("General", "[Q] / [Esc]", "Stop playback and go back"),
+    ];
+
+    for (cat, key, desc) in shortcuts {
+        table.add_row(vec![
+            comfy_table::Cell::new(cat).fg(comfy_table::Color::Cyan),
+            comfy_table::Cell::new(key).fg(comfy_table::Color::Yellow),
+            comfy_table::Cell::new(desc),
+        ]);
     }
+
+    println!("{}\n", table);
+    press_enter_to_continue();
+    Ok(())
 }
 
 async fn play_track(
@@ -1178,9 +1236,9 @@ async fn play_track(
             print_track_header(track, queue_info, false, true);
 
             let controls_help = if queue_info.is_some() {
-                "  🎮 Controls: [Space] Play/Pause  [N] Skip  [P] Prev  [Q] Stop/Back"
+                "  🎮 [Space] Pause • [N/P] Skip • [?] Keys • [Q] Back"
             } else {
-                "  🎮 Controls: [Space] Play/Pause  [Q] Stop/Back"
+                "  🎮 [Space] Pause • [?] Keys • [Q] Back"
             };
             println!("{}", theme::style_dim(controls_help));
 
@@ -1270,6 +1328,16 @@ async fn play_track(
                                             break;
                                         }
                                     }
+                                    KeyCode::Char('?')
+                                    | KeyCode::Char('h')
+                                    | KeyCode::Char('H') => {
+                                        disable_raw_mode().ok();
+                                        show_playback_help_modal().ok();
+                                        enable_raw_mode().ok();
+                                        clear_screen();
+                                        print_track_header(track, queue_info, false, true);
+                                        println!("{}", theme::style_dim(controls_help));
+                                    }
                                     KeyCode::Char('q') | KeyCode::Esc => {
                                         crate::discord::send_discord_command(
                                             &discord.token,
@@ -1348,27 +1416,10 @@ async fn play_track(
         }
     }
 
-    // Keep active playback details fresh on a cleared screen
-    clear_screen();
-
     let res = if use_cache {
-        let track_name = format!("{} - {}", title, artist);
         db.update_cached_track_accessed(video_id).ok();
         match player.play_local(cache_file.clone()) {
             Ok((sink, _total_dur, vis)) => {
-                if let Some((idx, total)) = queue_info {
-                    println!(
-                        "  💿 [{}/{}] Playing (cached): {}",
-                        idx + 1,
-                        total,
-                        theme::style_primary(&track_name)
-                    );
-                } else {
-                    println!(
-                        "  💿 Playing (cached): {}",
-                        theme::style_primary(&track_name)
-                    );
-                }
                 sink.set_volume(*current_volume);
                 Ok((sink, vis, None))
             }
@@ -1419,43 +1470,69 @@ async fn play_track(
                     "  🔍 '{}' is premium-only. Searching for a public version...",
                     theme::style_primary(title)
                 );
-                std::io::stdout().flush().ok();
-                let search_query = format!("{} {}", title, artist);
                 let client = NetworkClient::new();
-                match client.search(&search_query).await {
-                    Ok(results) => {
-                        let alternative = results
-                            .into_iter()
-                            .find(|t| t.id != track.id && is_matching_alternative(track, t));
-                        if let Some(alt_track) = alternative {
-                            println!(
-                                "  🔄 Found alternative: '{}' by '{}'. Playing alternative...",
-                                theme::style_primary(&alt_track.title),
-                                theme::style_primary(&alt_track.artist)
-                            );
-                            std::io::stdout().flush().ok();
-                            let alt_cache_file =
-                                config.cache_dir.join(format!("{}.m4a", alt_track.id));
-                            play_progressive_track(
-                                &alt_track.id,
-                                &alt_track.title,
-                                &alt_track.artist,
-                                config,
-                                queue_info,
-                                &player,
-                                current_volume,
-                                debug,
-                                &alt_cache_file,
-                            )
-                            .await?
-                        } else {
-                            return Err(e);
+                let query = format!("{} {}", title, artist);
+                if let Ok(search_results) = client.search(&query).await {
+                    let best_match = search_results
+                        .iter()
+                        .find(|t| t.id != *video_id && is_matching_alternative(track, t));
+
+                    if let Some(alt_track) = best_match {
+                        println!(
+                            "  ✨ Found alternative: {} - {} (ID: {})",
+                            theme::style_primary(&alt_track.title),
+                            theme::style_primary(&alt_track.artist),
+                            alt_track.id
+                        );
+                        let alt_cache_file = config.cache_dir.join(format!("{}.m4a", alt_track.id));
+                        match play_progressive_track(
+                            &alt_track.id,
+                            &alt_track.title,
+                            &alt_track.artist,
+                            config,
+                            queue_info,
+                            &player,
+                            current_volume,
+                            debug,
+                            &alt_cache_file,
+                        )
+                        .await
+                        {
+                            Ok(vals) => vals,
+                            Err(retry_err) => {
+                                println!(
+                                    "  ❌ Alternative playback failed: {}",
+                                    theme::style_error(&retry_err.to_string())
+                                );
+                                press_enter_to_continue();
+                                return Ok(PlaybackControl::Finished);
+                            }
                         }
+                    } else {
+                        println!(
+                            "  ❌ No suitable public alternative found for '{}'.",
+                            theme::style_error(title)
+                        );
+                        press_enter_to_continue();
+                        return Ok(PlaybackControl::Finished);
                     }
-                    Err(_) => return Err(e),
+                } else {
+                    println!(
+                        "  ❌ Playback failed for '{}': {}",
+                        title,
+                        theme::style_error(&err_msg)
+                    );
+                    press_enter_to_continue();
+                    return Ok(PlaybackControl::Finished);
                 }
             } else {
-                return Err(e);
+                println!(
+                    "  ❌ Playback failed for '{}': {}",
+                    title,
+                    theme::style_error(&err_msg)
+                );
+                press_enter_to_continue();
+                return Ok(PlaybackControl::Finished);
             }
         }
     };
@@ -1495,10 +1572,13 @@ async fn play_track(
 
     let mut show_lyrics = lyrics_enabled;
 
+    clear_screen();
+    print_track_header(track, queue_info, use_cache, false);
+
     let controls_help = if queue_info.is_some() {
-        "  🎮 [Space] Play/Pause [←/→] Seek [↑/↓] Vol [M] Mute [N] Next [P] Prev [R] Repeat [S] Shuffle [Tab] Queue [F] Fav [A] Add [L] Lyrics [Q] Stop"
+        "  🎮 [Space] Pause • [N/P] Skip • [Tab] Queue • [?] Keys • [Q] Back"
     } else {
-        "  🎮 [Space] Play/Pause [←/→] Seek [↑/↓] Vol [M] Mute [R] Repeat [F] Fav [A] Add [L] Lyrics [Q] Stop"
+        "  🎮 [Space] Pause • [←/→] Seek • [↑/↓] Vol • [?] Keys • [Q] Back"
     };
     println!("{}", theme::style_dim(controls_help));
 
@@ -1689,6 +1769,14 @@ async fn play_track(
                             }
                             KeyCode::Char('l') | KeyCode::Char('L') => {
                                 show_lyrics = !show_lyrics;
+                            }
+                            KeyCode::Char('?') | KeyCode::Char('h') | KeyCode::Char('H') => {
+                                disable_raw_mode().ok();
+                                show_playback_help_modal().ok();
+                                enable_raw_mode().ok();
+                                clear_screen();
+                                print_track_header(track, queue_info, use_cache, false);
+                                println!("{}", theme::style_dim(controls_help));
                             }
                             KeyCode::Char('q') | KeyCode::Esc => {
                                 sink.stop();

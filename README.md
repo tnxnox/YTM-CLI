@@ -48,6 +48,7 @@ During playback, you can control the music in real time:
 | `[F]` | Toggle Favorite / Liked Song (❤️) |
 | `[A]` | Add Current Track to Local Playlist |
 | `[L]` | Toggle Synced Lyrics Display |
+| `[?]` / `[H]` | Open In-Playback Keybindings Cheatsheet Modal |
 | `[N]` | Skip to Next Track |
 | `[P]` | Go back to Previous Track |
 | `[Q]` / `[Esc]` | Stop Playback & Go Back |
